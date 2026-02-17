@@ -95,6 +95,9 @@ jobs:
           # Pre-compiled device-tree overlays (arch-independent)
           cp ili9481.dtbo package/
           cp xpt2046.dtbo package/
+          # Overlay sources (preferred by install.sh when present)
+          cp ili9481-overlay.dts package/
+          cp xpt2046-overlay.dts package/
           # Source files for on-device DKMS build
           cp ili9481.c package/
           cp Makefile package/
@@ -102,7 +105,12 @@ jobs:
           cp dkms.conf package/
           # Installer
           cp install.sh package/
+          cp uninstall.sh package/
+          mkdir -p package/scripts
+          cp scripts/test-display.sh package/scripts/
           chmod +x package/install.sh
+          chmod +x package/uninstall.sh
+          chmod +x package/scripts/test-display.sh
           # Build metadata
           echo "kernel_branch=${{ env.KERNEL_BRANCH }}" > package/BUILD_INFO
           echo "compile_check_arch=${{ matrix.arch }}" >> package/BUILD_INFO

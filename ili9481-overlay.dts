@@ -13,7 +13,12 @@
  *   Add to /boot/config.txt: dtoverlay=ili9481
  *
  * Optional overrides:
- *   dtoverlay=ili9481,speed=12000000,rotate=90,dc=22,reset=27
+ *   dtoverlay=ili9481,speed=12000000,rotate=90,dc=22,reset=27,panel=0
+ *
+ * panel values:
+ *   0 = ILI9481 (default)
+ *   1 = ILI9486
+ *   2 = ILI9488
  */
 /dts-v1/;
 /plugin/;
@@ -52,6 +57,7 @@
 				dc-gpios = <&gpio 22 0>;	/* GPIO22, active high */
 				reset-gpios = <&gpio 27 1>;	/* GPIO27, active low */
 				rotation = <0>;
+				panel = <0>; /* 0=ILI9481, 1=ILI9486, 2=ILI9488 */
 			};
 		};
 	};
@@ -88,5 +94,6 @@
 		rotate  = <&ili9481>, "rotation:0";
 		dc      = <&ili9481>, "dc-gpios:4";
 		reset   = <&ili9481>, "reset-gpios:4";
+		panel   = <&ili9481>, "panel:0";
 	};
 };

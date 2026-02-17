@@ -54,6 +54,66 @@
 #define ILI9481_IFCTL     0xC6   /* Interface Control */
 #define ILI9481_DISPTIM   0xC1   /* Display Timing for Normal Mode */
 
+enum ili948x_panel {
+	ILI948X_PANEL_ILI9481 = 0,
+	ILI948X_PANEL_ILI9486 = 1,
+	ILI948X_PANEL_ILI9488 = 2,
+};
+
+struct ili948x_match_data {
+	enum ili948x_panel panel;
+	const char *name;
+};
+
+static const struct ili948x_match_data ili9481_data = {
+	.panel = ILI948X_PANEL_ILI9481,
+	.name = "ILI9481",
+};
+
+static const struct ili948x_match_data ili9486_data = {
+	.panel = ILI948X_PANEL_ILI9486,
+	.name = "ILI9486",
+};
+
+static const struct ili948x_match_data ili9488_data = {
+	.panel = ILI948X_PANEL_ILI9488,
+	.name = "ILI9488",
+};
+
+static enum ili948x_panel ili948x_get_panel(struct device *dev)
+{
+	const struct ili948x_match_data *match;
+	u32 panel;
+
+	match = device_get_match_data(dev);
+	if (match)
+		panel = match->panel;
+	else
+		panel = ILI948X_PANEL_ILI9481;
+
+	if (!device_property_read_u32(dev, "panel", &panel) &&
+	    panel <= ILI948X_PANEL_ILI9488)
+		return panel;
+
+	if (panel > ILI948X_PANEL_ILI9488)
+		return ILI948X_PANEL_ILI9481;
+
+	return panel;
+}
+
+static const char *ili948x_panel_name(enum ili948x_panel panel)
+{
+	switch (panel) {
+	case ILI948X_PANEL_ILI9486:
+		return "ILI9486";
+	case ILI948X_PANEL_ILI9488:
+		return "ILI9488";
+	case ILI948X_PANEL_ILI9481:
+	default:
+		return "ILI9481";
+	}
+}
+
 static const struct drm_display_mode ili9481_mode = {
 	DRM_SIMPLE_MODE(320, 480, 49, 73),
 };
@@ -65,14 +125,15 @@ static void ili9481_enable(struct drm_simple_display_pipe *pipe,
 	struct mipi_dbi_dev *dbidev = drm_to_mipi_dbi_dev(pipe->crtc.dev);
 	struct device *dev = pipe->crtc.dev->dev;
 	struct mipi_dbi *dbi = &dbidev->dbi;
+	enum ili948x_panel panel = ili948x_get_panel(dev);
 	u8 addr_mode;
 	int idx;
 
 	if (!drm_dev_enter(pipe->crtc.dev, &idx))
 		return;
 
-	dev_info(dev, "ili9481_enable: starting display init (SPI max %u Hz)\n",
-		 dbi->spi->max_speed_hz);
+	dev_info(dev, "ili9481_enable: starting display init (%s, SPI max %u Hz)\n",
+		 ili948x_panel_name(panel), dbi->spi->max_speed_hz);
 
 	/*
 	 * Bypass mipi_dbi_poweron_conditional_reset() entirely.
@@ -123,38 +184,80 @@ static void ili9481_enable(struct drm_simple_display_pipe *pipe,
 	msleep(5);
 	mipi_dbi_command(dbi, MIPI_DCS_EXIT_INVERT_MODE);
 
-	/* Unlock all commands (needed by some ILI9481 panel variants) */
-	mipi_dbi_command(dbi, ILI9481_CMDPROT, 0x00);
+	switch (panel) {
+	case ILI948X_PANEL_ILI9486:
+		mipi_dbi_command(dbi, 0xF2, 0x18);
+		mipi_dbi_command(dbi, 0xF8, 0x21, 0x04);
+		mipi_dbi_command(dbi, 0xF9, 0x00, 0x08);
+		mipi_dbi_command(dbi, 0xC0, 0x0D, 0x0D);
+		mipi_dbi_command(dbi, 0xC1, 0x43, 0x00);
+		mipi_dbi_command(dbi, 0xC2, 0x00);
+		mipi_dbi_command(dbi, 0xC5, 0x00, 0x48);
+		mipi_dbi_command(dbi, 0xB4, 0x00);
+		mipi_dbi_command(dbi, 0xB6, 0x00, 0x02, 0x3B);
+		mipi_dbi_command(dbi, 0xB7, 0x07);
+		mipi_dbi_command(dbi, 0xE0,
+				 0x0F, 0x1F, 0x1C, 0x0C, 0x0F, 0x08, 0x48, 0x98,
+				 0x37, 0x0A, 0x13, 0x04, 0x11, 0x0D, 0x00);
+		mipi_dbi_command(dbi, 0xE1,
+				 0x0F, 0x32, 0x2E, 0x0B, 0x0D, 0x05, 0x47, 0x75,
+				 0x37, 0x06, 0x10, 0x03, 0x24, 0x20, 0x00);
+		break;
 
-	/* Power Setting: VCI1=VCI, DDVDH=VCI*2, VGH=VCI*7, VGL=-VCI*4 */
-	mipi_dbi_command(dbi, ILI9481_PWRSET, 0x07, 0x42, 0x18);
+	case ILI948X_PANEL_ILI9488:
+		mipi_dbi_command(dbi, 0xE0,
+				 0x00, 0x03, 0x09, 0x08, 0x16, 0x0A, 0x3F, 0x78,
+				 0x4C, 0x09, 0x0A, 0x08, 0x16, 0x1A, 0x0F);
+		mipi_dbi_command(dbi, 0xE1,
+				 0x00, 0x16, 0x19, 0x03, 0x0F, 0x05, 0x32, 0x45,
+				 0x46, 0x04, 0x0E, 0x0D, 0x35, 0x37, 0x0F);
+		mipi_dbi_command(dbi, 0xC0, 0x17, 0x15);
+		mipi_dbi_command(dbi, 0xC1, 0x41);
+		mipi_dbi_command(dbi, 0xC5, 0x00, 0x12, 0x80);
+		mipi_dbi_command(dbi, 0xB0, 0x00);
+		mipi_dbi_command(dbi, 0xB1, 0xA0);
+		mipi_dbi_command(dbi, 0xB4, 0x02);
+		mipi_dbi_command(dbi, 0xB6, 0x02, 0x02);
+		mipi_dbi_command(dbi, 0xE9, 0x00);
+		mipi_dbi_command(dbi, 0xF7, 0xA9, 0x51, 0x2C, 0x82);
+		break;
 
-	/* VCOM Control: VCOMH, VCOML */
-	mipi_dbi_command(dbi, ILI9481_VMCTR, 0x00, 0x07, 0x10);
+	case ILI948X_PANEL_ILI9481:
+	default:
+		/* Unlock all commands (needed by some ILI9481 panel variants) */
+		mipi_dbi_command(dbi, ILI9481_CMDPROT, 0x00);
 
-	/* Power Setting for Normal Mode */
-	mipi_dbi_command(dbi, ILI9481_PWRNORM, 0x01, 0x02);
+		/* Power Setting: VCI1=VCI, DDVDH=VCI*2, VGH=VCI*7, VGL=-VCI*4 */
+		mipi_dbi_command(dbi, ILI9481_PWRSET, 0x07, 0x42, 0x18);
 
-	/* Panel Driving Setting */
-	mipi_dbi_command(dbi, ILI9481_PANELDRV, 0x10, 0x3B, 0x00, 0x02, 0x11);
+		/* VCOM Control: VCOMH, VCOML */
+		mipi_dbi_command(dbi, ILI9481_VMCTR, 0x00, 0x07, 0x10);
 
-	/*
-	 * Display Timing Setting for Normal Mode —
-	 * Ensures the display controller uses the correct internal clocks
-	 * and division ratios for the panel's scan timing.
-	 */
-	mipi_dbi_command(dbi, ILI9481_DISPTIM, 0x10, 0x10, 0x02, 0x02);
+		/* Power Setting for Normal Mode */
+		mipi_dbi_command(dbi, ILI9481_PWRNORM, 0x01, 0x02);
 
-	/* Frame Rate & Inversion Control */
-	mipi_dbi_command(dbi, ILI9481_FRMCTL, 0x03);
+		/* Panel Driving Setting */
+		mipi_dbi_command(dbi, ILI9481_PANELDRV, 0x10, 0x3B, 0x00, 0x02, 0x11);
 
-	/* Interface Control — set DBI type to match our SPI wiring */
-	mipi_dbi_command(dbi, ILI9481_IFCTL, 0x02);
+		/*
+		 * Display Timing Setting for Normal Mode —
+		 * Ensures the display controller uses the correct internal clocks
+		 * and division ratios for the panel's scan timing.
+		 */
+		mipi_dbi_command(dbi, ILI9481_DISPTIM, 0x10, 0x10, 0x02, 0x02);
 
-	/* Gamma Setting */
-	mipi_dbi_command(dbi, ILI9481_GAMSET,
-			 0x00, 0x32, 0x36, 0x45, 0x06, 0x16,
-			 0x37, 0x75, 0x77, 0x54, 0x0C, 0x00);
+		/* Frame Rate & Inversion Control */
+		mipi_dbi_command(dbi, ILI9481_FRMCTL, 0x03);
+
+		/* Interface Control — set DBI type to match our SPI wiring */
+		mipi_dbi_command(dbi, ILI9481_IFCTL, 0x02);
+
+		/* Gamma Setting */
+		mipi_dbi_command(dbi, ILI9481_GAMSET,
+				 0x00, 0x32, 0x36, 0x45, 0x06, 0x16,
+				 0x37, 0x75, 0x77, 0x54, 0x0C, 0x00);
+		break;
+	}
 
 	/*
 	 * Set rotation via MADCTL — BEFORE Display ON and pixel writes.
@@ -196,8 +299,8 @@ static void ili9481_enable(struct drm_simple_display_pipe *pipe,
 	mipi_dbi_command(dbi, MIPI_DCS_SET_PAGE_ADDRESS,
 			 0x00, 0x00, 0x01, 0xDF); /* 0 .. 479 */
 
-	dev_info(dev, "ili9481_enable: init commands sent (MADCTL=0x%02x), turning display on\n",
-		 addr_mode);
+	dev_info(dev, "ili9481_enable: init commands sent (%s, MADCTL=0x%02x), turning display on\n",
+		 ili948x_panel_name(panel), addr_mode);
 
 	/* Display ON */
 	mipi_dbi_command(dbi, MIPI_DCS_SET_DISPLAY_ON);
@@ -238,6 +341,7 @@ static int ili9481_probe(struct spi_device *spi)
 	struct drm_device *drm;
 	struct mipi_dbi *dbi;
 	struct gpio_desc *dc;
+	enum ili948x_panel panel;
 	u32 rotation = 0;
 	int ret;
 
@@ -264,6 +368,8 @@ static int ili9481_probe(struct spi_device *spi)
 		return dev_err_probe(dev, PTR_ERR(dbidev->backlight),
 				     "Failed to get backlight\n");
 
+	panel = ili948x_get_panel(dev);
+
 	device_property_read_u32(dev, "rotation", &rotation);
 
 	ret = mipi_dbi_spi_init(spi, dbi, dc);
@@ -289,8 +395,9 @@ static int ili9481_probe(struct spi_device *spi)
 	drm_fbdev_generic_setup(drm, 16);
 #endif
 
-	dev_info(dev, "ILI9481 display registered (%ux%u, rotation %u°)\n",
-		 ili9481_mode.hdisplay, ili9481_mode.vdisplay, rotation);
+	dev_info(dev, "%s display registered (%ux%u, rotation %u°, panel=%u)\n",
+		 ili948x_panel_name(panel), ili9481_mode.hdisplay,
+		 ili9481_mode.vdisplay, rotation, panel);
 
 	return 0;
 }
@@ -310,7 +417,9 @@ static void ili9481_shutdown(struct spi_device *spi)
 }
 
 static const struct of_device_id ili9481_of_match[] = {
-	{ .compatible = "ilitek,ili9481" },
+	{ .compatible = "ilitek,ili9481", .data = &ili9481_data },
+	{ .compatible = "ilitek,ili9486", .data = &ili9486_data },
+	{ .compatible = "ilitek,ili9488", .data = &ili9488_data },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, ili9481_of_match);

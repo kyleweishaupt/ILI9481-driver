@@ -141,15 +141,16 @@ dtoverlay=ili9481
 ### With Optional Parameters
 
 ```ini
-dtoverlay=ili9481,speed=12000000,rotate=90,dc=22,reset=27
+dtoverlay=ili9481,speed=12000000,rotate=90,dc=22,reset=27,panel=0
 ```
 
-| Parameter | Default  | Description                        |
-| --------- | -------- | ---------------------------------- |
-| `speed`   | 12000000 | SPI clock frequency in Hz          |
-| `rotate`  | 0        | Display rotation (0, 90, 180, 270) |
-| `dc`      | 22       | GPIO number for Data/Command pin   |
-| `reset`   | 27       | GPIO number for Reset pin          |
+| Parameter | Default  | Description                                         |
+| --------- | -------- | --------------------------------------------------- |
+| `speed`   | 12000000 | SPI clock frequency in Hz                           |
+| `rotate`  | 0        | Display rotation (0, 90, 180, 270)                  |
+| `dc`      | 22       | GPIO number for Data/Command pin                    |
+| `reset`   | 27       | GPIO number for Reset pin                           |
+| `panel`   | 0        | Controller profile: 0=ILI9481, 1=ILI9486, 2=ILI9488 |
 
 ### Touchscreen (XPT2046)
 
