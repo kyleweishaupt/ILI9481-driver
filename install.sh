@@ -99,14 +99,32 @@ STEP=$((STEP + 1))
 
 echo "[$STEP/$TOTAL] Compiling device-tree overlays ..."
 if [ -f "$DTS_SRC" ]; then
-    dtc -@ -Hepapr -I dts -O dtb -o "$DTBO" "$DTS_SRC" 2>/dev/null
+    # Suppress dtc warnings (phandle refs in overlays) but show errors
+    if ! dtc -@ -Hepapr -I dts -O dtb -o "$DTBO" "$DTS_SRC" 2>/dev/null; then
+        echo "  Error: dtc failed to compile ili9481-overlay.dts"
+        echo "  Trying without -Hepapr..."
+        dtc -@ -I dts -O dtb -o "$DTBO" "$DTS_SRC" 2>/dev/null || {
+            echo "  Error: device-tree compilation failed. Check $DTS_SRC"
+            exit 1
+        }
+    fi
+    if [ ! -f "$DTBO" ]; then
+        echo "  Error: ili9481.dtbo was not created"
+        exit 1
+    fi
     echo "  Compiled ili9481-overlay.dts → ili9481.dtbo"
 else
+    if [ ! -f "$DTBO" ]; then
+        echo "  Error: No .dts source or pre-compiled .dtbo found"
+        exit 1
+    fi
     echo "  Using pre-compiled ili9481.dtbo"
 fi
 if [ -f "$TOUCH_DTS_SRC" ]; then
-    dtc -@ -Hepapr -I dts -O dtb -o "$TOUCH_DTBO" "$TOUCH_DTS_SRC" 2>/dev/null
-    echo "  Compiled xpt2046-overlay.dts → xpt2046.dtbo"
+    dtc -@ -Hepapr -I dts -O dtb -o "$TOUCH_DTBO" "$TOUCH_DTS_SRC" 2>/dev/null \
+      || dtc -@ -I dts -O dtb -o "$TOUCH_DTBO" "$TOUCH_DTS_SRC" 2>/dev/null \
+      || echo "  Warning: could not compile xpt2046-overlay.dts (touch may not work)"
+    [ -f "$TOUCH_DTBO" ] && echo "  Compiled xpt2046-overlay.dts → xpt2046.dtbo"
 else
     echo "  Using pre-compiled xpt2046.dtbo (or not present)"
 fi

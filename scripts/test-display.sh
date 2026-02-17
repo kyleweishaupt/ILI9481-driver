@@ -83,8 +83,8 @@ if [ -n "$FB_DEV" ] && [ -w "$FB_DEV" ]; then
     echo ""
     info "Painting colour bar test pattern to $FB_DEV ..."
 
-    # 480×320 @ RGB565 = 307200 bytes
-    W=480; H=320; BPP=2
+    # 320×480 @ RGB565 = 307200 bytes (native portrait)
+    W=320; H=480; BPP=2
     STRIPE=$((H / 4))
     {
         # Red stripe   (RGB565 = 0xF800 → little-endian: 00 F8)

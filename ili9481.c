@@ -73,9 +73,12 @@ static void ili9481_enable(struct drm_simple_display_pipe *pipe,
 	if (ret == 1)
 		goto out_enable;
 
+	/* Command Access Protect — allow all commands */
+	mipi_dbi_command(dbi, 0xB0, 0x00);
+
 	/* Exit Sleep Mode */
 	mipi_dbi_command(dbi, MIPI_DCS_EXIT_SLEEP_MODE);
-	msleep(20);
+	msleep(120);
 
 	/* Power Setting: VCI1=VCI, DDVDH=VCI*2, VGH=VCI*7, VGL=-VCI*4 */
 	mipi_dbi_command(dbi, ILI9481_PWRSET, 0x07, 0x42, 0x18);
@@ -103,11 +106,18 @@ static void ili9481_enable(struct drm_simple_display_pipe *pipe,
 	/* Enter Inversion Mode (required for correct colors on SPI) */
 	mipi_dbi_command(dbi, MIPI_DCS_ENTER_INVERT_MODE);
 
-	/* Column Address Set: 0x0000 - 0x013F (0 - 319) */
+	/*
+	 * Set the full native address window.
+	 * mipi_dbi_enable_flush() will re-set these based on the
+	 * actual framebuffer dimensions, but setting them here
+	 * ensures the controller is in a known state.
+	 */
+
+	/* Column Address Set: 0x0000 - 0x013F (0 - 319, native width) */
 	mipi_dbi_command(dbi, MIPI_DCS_SET_COLUMN_ADDRESS,
 			 0x00, 0x00, 0x01, 0x3F);
 
-	/* Page Address Set: 0x0000 - 0x01DF (0 - 479) */
+	/* Page Address Set: 0x0000 - 0x01DF (0 - 479, native height) */
 	mipi_dbi_command(dbi, MIPI_DCS_SET_PAGE_ADDRESS,
 			 0x00, 0x00, 0x01, 0xDF);
 
@@ -150,7 +160,7 @@ static const struct drm_simple_display_pipe_funcs ili9481_pipe_funcs = {
 };
 
 static const struct drm_display_mode ili9481_mode = {
-	DRM_SIMPLE_MODE(480, 320, 73, 49),
+	DRM_SIMPLE_MODE(320, 480, 49, 73),
 };
 
 DEFINE_DRM_GEM_DMA_FOPS(ili9481_fops);

@@ -170,12 +170,12 @@ The default touch wiring assumes:
 Set the `rotation` device-tree property (0, 90, 180, 270). The driver
 translates this to the ILI9481 MADCTL register:
 
-| Rotation | MADCTL | Effective Resolution |
-| -------- | ------ | -------------------- |
-| 0°       | 0x48   | 480 × 320            |
-| 90°      | 0x28   | 320 × 480            |
-| 180°     | 0x88   | 480 × 320            |
-| 270°     | 0xE8   | 320 × 480            |
+| Rotation | MADCTL | Effective Resolution  |
+| -------- | ------ | --------------------- |
+| 0°       | 0x48   | 320 × 480 (portrait)  |
+| 90°      | 0x28   | 480 × 320 (landscape) |
+| 180°     | 0x88   | 320 × 480 (portrait)  |
+| 270°     | 0xE8   | 480 × 320 (landscape) |
 
 ## Testing & Validation
 
@@ -194,7 +194,7 @@ modetest -M ili9481
 
 # Display a test pattern (fill screen red via fbdev)
 sudo apt-get install -y fbset
-cat /dev/urandom | head -c $((480*320*2)) > /dev/fb0
+cat /dev/urandom | head -c $((320*480*2)) > /dev/fb0
 
 # Or use the included test script
 sudo ./scripts/test-display.sh
