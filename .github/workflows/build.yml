@@ -56,7 +56,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/kernel-source
-          key: kernel-${{ env.KERNEL_BRANCH }}-${{ matrix.arch }}-${{ matrix.defconfig }}
+          key: kernel-v3-${{ env.KERNEL_BRANCH }}-${{ matrix.arch }}-${{ matrix.defconfig }}
 
       - name: Clone Raspberry Pi kernel (cache miss)
         if: steps.cache-kernel.outputs.cache-hit != 'true'
@@ -72,14 +72,8 @@ jobs:
             ${{ matrix.defconfig }}
           make ARCH=${{ matrix.arch }} CROSS_COMPILE=${{ matrix.cross_compile }} \
             modules_prepare
-          # Create empty Module.symvers for out-of-tree build.
-          # Symbol resolution happens at module load time on the
-          # target device, not at build time during cross-compilation.
-          # KBUILD_MODPOST_WARN=1 is passed at build time so modpost
-          # treats the unresolved symbols as warnings, not errors.
-          touch Module.symvers
 
-      - name: Build kernel module
+      - name: Cross-compile check
         run: |
           make -C ~/kernel-source \
             ARCH=${{ matrix.arch }} \
@@ -98,31 +92,34 @@ jobs:
       - name: Stage install package
         run: |
           mkdir -p package
-          cp ili9481.ko package/
+          # Pre-compiled device-tree overlays (arch-independent)
           cp ili9481.dtbo package/
           cp xpt2046.dtbo package/
+          # Source files for on-device DKMS build
+          cp ili9481.c package/
+          cp Makefile package/
+          cp Kconfig package/
+          cp dkms.conf package/
+          # Installer
           cp install.sh package/
           chmod +x package/install.sh
-          # Record build metadata
-          echo "arch=${{ matrix.arch }}" > package/BUILD_INFO
-          echo "kernel_branch=${{ env.KERNEL_BRANCH }}" >> package/BUILD_INFO
+          # Build metadata
+          echo "kernel_branch=${{ env.KERNEL_BRANCH }}" > package/BUILD_INFO
+          echo "compile_check_arch=${{ matrix.arch }}" >> package/BUILD_INFO
           echo "defconfig=${{ matrix.defconfig }}" >> package/BUILD_INFO
           echo "built=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> package/BUILD_INFO
-          KVER=$(make -s -C ~/kernel-source kernelrelease 2>/dev/null || echo "unknown")
-          echo "kernel_version=$KVER" >> package/BUILD_INFO
 
-      - name: Verify artifacts
+      - name: Verify
         run: |
-          echo "=== Kernel module ==="
-          file package/ili9481.ko
-          modinfo package/ili9481.ko
+          echo "=== Cross-compile check ==="
+          modinfo ili9481.ko
           echo ""
           echo "=== Device tree overlays ==="
           file package/ili9481.dtbo
           file package/xpt2046.dtbo
           echo ""
-          echo "=== Build info ==="
-          cat package/BUILD_INFO
+          echo "=== Package contents ==="
+          ls -la package/
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
