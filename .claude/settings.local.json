@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C /d/CodeProjects/ScreenDriver log --oneline -20)",
+      "Bash(git -C /d/CodeProjects/ScreenDriver remote -v)"
+    ]
+  }
+}
