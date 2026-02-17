@@ -1,0 +1,18 @@
+# Force LF line endings for all text files on all platforms.
+# This prevents Windows CRLF from breaking shell scripts on the Pi.
+* text=auto eol=lf
+
+# Explicitly mark shell scripts
+*.sh text eol=lf
+
+# Explicitly mark source files
+*.c text eol=lf
+*.h text eol=lf
+*.dts text eol=lf
+Makefile text eol=lf
+Kconfig text eol=lf
+dkms.conf text eol=lf
+
+# Binary files
+*.dtbo binary
+*.ko binary

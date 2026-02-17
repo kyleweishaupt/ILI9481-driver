@@ -5,7 +5,7 @@
  * Default wiring:
  *   DC    = GPIO22
  *   RESET = GPIO27 (active low)
- *   SPI   = SPI0, CE0, 16 MHz
+ *   SPI   = SPI0, CE0, 12 MHz (ILI9481 max per datasheet ≈ 15 MHz)
  *
  * Usage:
  *   dtc -@ -Hepapr -I dts -O dtb -o ili9481.dtbo ili9481-overlay.dts
@@ -47,7 +47,7 @@
 			ili9481: ili9481@0 {
 				compatible = "ilitek,ili9481";
 				reg = <0>;		/* CE0 */
-				spi-max-frequency = <16000000>;
+				spi-max-frequency = <12000000>;
 
 				dc-gpios = <&gpio 22 0>;	/* GPIO22, active high */
 				reset-gpios = <&gpio 27 1>;	/* GPIO27, active low */
