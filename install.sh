@@ -212,13 +212,14 @@ if [ -f "$CMDLINE" ]; then
     sed -i 's/ splash//g' "$CMDLINE"
     # Remove logo.nologo if present so the Raspberry Pi boot logo appears
     sed -i 's/ logo\.nologo//g' "$CMDLINE"
-    # Map primary console to fb0 (the ILI9481 framebuffer).
-    # The ILI9481 DRM driver registers first and claims fb0.
-    sed -i '1s/$/ fbcon=map:0/' "$CMDLINE"
-    echo "  Set fbcon=map:0 in $CMDLINE"
+    # Map primary console to fb1 (the ILI9481 framebuffer).
+    # vc4-kms-v3d always registers first as card0/fb0; the ILI9481
+    # DRM driver registers second as card1/fb1.
+    sed -i '1s/$/ fbcon=map:1/' "$CMDLINE"
+    echo "  Set fbcon=map:1 in $CMDLINE (ILI9481 = fb1 when vc4 is present)"
     echo "  Removed 'splash' for SPI display boot visibility"
 else
-    echo "  Warning: $CMDLINE not found — add 'fbcon=map:0' manually."
+    echo "  Warning: $CMDLINE not found — add 'fbcon=map:1' manually."
 fi
 STEP=$((STEP + 1))
 
@@ -235,9 +236,10 @@ cat > "$XORG_CONF" <<'XEOF'
 Section "Device"
     Identifier  "ILI9481"
     Driver      "modesetting"
-    Option      "kmsdev" ""
-    # The kmsdev path is filled at boot by the udev helper below.
-    # If only the SPI display is wanted, you can hardcode e.g. /dev/dri/card1
+    Option      "kmsdev" "/dev/dri/card1"
+    # card1 is the ILI9481; card0 is vc4-kms-v3d (HDMI/DSI).
+    # The ili9481-display.service updates this path at boot in case
+    # the card number ever differs from the default.
 EndSection
 
 # Prefer the ILI9481 output over HDMI
@@ -257,22 +259,37 @@ echo "  Created $XORG_CONF"
 HELPER="/usr/local/bin/ili9481-find-card"
 cat > "$HELPER" <<'HEOF'
 #!/bin/bash
-# Find the /dev/dri/cardN belonging to the ili9481 driver.
+# Find the /dev/dri/cardN belonging to the ili9481 driver and configure
+# all display sinks (X11 modesetting, Wayland/wlroots) to use it.
 # Wait up to 30 seconds for the module to load (it loads via DT overlay
 # and DKMS, which can take 10-15s on a Pi 3).
 TIMEOUT=30
 ELAPSED=0
 while [ $ELAPSED -lt $TIMEOUT ]; do
-    for card in /sys/class/drm/card*/device/driver/module; do
-        [ -e "$card" ] || continue
-        mod=$(basename "$(readlink -f "$card")" 2>/dev/null)
+    for drv_link in /sys/class/drm/card*/device/driver; do
+        [ -d "$drv_link" ] || continue
+        mod=$(basename "$(readlink -f "$drv_link/module")" 2>/dev/null)
         if [ "$mod" = "ili9481" ]; then
-            CARD="/dev/dri/$(basename "$(dirname "$(dirname "$(dirname "$card")")")")"
-            # Update the X11 config with the correct card path
+            CARD_NAME=$(basename "$(dirname "$(dirname "$drv_link")")") 
+            CARD_DEV="/dev/dri/$CARD_NAME"
+
+            # Update X11 modesetting kmsdev path
             if [ -f /etc/X11/xorg.conf.d/99-ili9481.conf ]; then
-                sed -i "s|\"kmsdev\".*|\"kmsdev\" \"$CARD\"|" /etc/X11/xorg.conf.d/99-ili9481.conf
+                sed -i "s|Option.*\"kmsdev\".*|    Option      \"kmsdev\" \"$CARD_DEV\"|" \
+                    /etc/X11/xorg.conf.d/99-ili9481.conf
             fi
-            echo "$CARD"
+
+            # Set WLR_DRM_DEVICES for Wayland compositors (labwc, wayfire, sway).
+            # Restricts wlroots to the ILI9481 DRM device only, preventing
+            # the compositor from also scanning vc4 HDMI/DSI outputs.
+            printf 'WLR_DRM_DEVICES=%s\n' "$CARD_DEV" \
+                > /etc/environment.d/99-ili9481.conf
+            if [ -d /etc/labwc ]; then
+                printf 'WLR_DRM_DEVICES=%s\n' "$CARD_DEV" \
+                    > /etc/labwc/environment
+            fi
+
+            echo "$CARD_DEV"
             exit 0
         fi
     done
@@ -284,6 +301,17 @@ exit 1
 HEOF
 chmod +x "$HELPER"
 echo "  Created $HELPER"
+
+# Pre-create Wayland environment files with the expected card path.
+# The ili9481-display.service updates them at first boot with the
+# real path (in case it differs from card1).
+mkdir -p /etc/environment.d
+printf 'WLR_DRM_DEVICES=/dev/dri/card1\n' > /etc/environment.d/99-ili9481.conf
+echo "  Created /etc/environment.d/99-ili9481.conf (Wayland WLR_DRM_DEVICES=card1)"
+# labwc reads /etc/labwc/environment before starting the compositor
+mkdir -p /etc/labwc
+printf 'WLR_DRM_DEVICES=/dev/dri/card1\n' > /etc/labwc/environment
+echo "  Created /etc/labwc/environment (labwc compositor Wayland env)"
 
 # Run the helper at boot before the display manager starts
 SYSTEMD_SVC="/etc/systemd/system/ili9481-display.service"

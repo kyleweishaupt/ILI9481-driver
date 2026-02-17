@@ -137,6 +137,10 @@ rm -f /etc/X11/xorg.conf.d/99-ili9481.conf 2>/dev/null && \
     echo "  Removed /etc/X11/xorg.conf.d/99-ili9481.conf" || true
 rm -f /usr/local/bin/ili9481-find-card 2>/dev/null && \
     echo "  Removed /usr/local/bin/ili9481-find-card" || true
+rm -f /etc/environment.d/99-ili9481.conf 2>/dev/null && \
+    echo "  Removed /etc/environment.d/99-ili9481.conf (Wayland WLR_DRM_DEVICES)" || true
+rm -f /etc/labwc/environment 2>/dev/null && \
+    echo "  Removed /etc/labwc/environment (labwc compositor env)" || true
 
 if [ -f /etc/systemd/system/ili9481-display.service ]; then
     systemctl disable ili9481-display.service 2>/dev/null || true

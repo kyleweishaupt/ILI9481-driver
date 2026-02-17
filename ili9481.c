@@ -246,9 +246,9 @@ static int ili9481_probe(struct spi_device *spi)
 	spi_set_drvdata(spi, drm);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
-	drm_fbdev_dma_setup(drm, 0);
+	drm_fbdev_dma_setup(drm, 16);   /* 16 bpp = RGB565 — must match pixel format */
 #else
-	drm_fbdev_generic_setup(drm, 0);
+	drm_fbdev_generic_setup(drm, 16);
 #endif
 
 	dev_info(dev, "ILI9481 display registered (%ux%u, rotation %u°)\n",

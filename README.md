@@ -246,20 +246,22 @@ depend on them.
 
 ## Troubleshooting
 
-| Symptom                                     | Possible Cause                       | Fix                                                                        |
-| ------------------------------------------- | ------------------------------------ | -------------------------------------------------------------------------- |
-| White/blank screen                          | Init sequence skipped (MISO float)   | Update driver to v1.1+; re-run `sudo ./install.sh` and reboot              |
-| White screen persists after update          | Old module still loaded (DKMS cache) | `sudo ./uninstall.sh && sudo ./install.sh && sudo reboot`                  |
-| White/blank screen after install            | Stale/missing .dtbo overlay          | Re-run `sudo ./install.sh` to recompile overlays from .dts sources         |
-| No boot logo on SPI display                 | Plymouth `splash` in cmdline.txt     | Re-run `sudo ./install.sh` (it removes `splash` from cmdline.txt)          |
-| `modprobe: FATAL: Module ili9481 not found` | Module not installed or wrong kernel | Run `sudo ./install.sh` or `sudo make install-dkms`                        |
-| Colors inverted                             | Missing inversion command            | Driver includes `ENTER_INVERT_MODE` by default; check your panel datasheet |
-| `No such device` on `/dev/fb0`              | Overlay not loaded                   | Verify `dtoverlay=ili9481` is in `/boot/config.txt` and reboot             |
-| Garbled display                             | Incorrect rotation                   | Try `rotate=0` (default) first                                             |
-| Touch not working                           | XPT2046 overlay not loaded           | Verify `dtoverlay=xpt2046` is in `/boot/config.txt`; check wiring          |
-| Touch coordinates misaligned                | Needs calibration                    | Run `DISPLAY=:0 xinput_calibrator` and update CalibrationMatrix            |
-| Desktop appears on HDMI, not SPI display    | X11 not configured for ili9481       | Re-run install script (creates `/etc/X11/xorg.conf.d/99-ili9481.conf`)     |
-| Mouse/keyboard laggy                        | SPI speed too high causing CPU load  | Lower `speed` parameter in `/boot/config.txt` overlay line                 |
+| Symptom                                     | Possible Cause                       | Fix                                                                                                                                              |
+| ------------------------------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| White/blank screen                          | Init sequence skipped (MISO float)   | Update driver to v1.1+; re-run `sudo ./install.sh` and reboot                                                                                    |
+| White screen persists after update          | Old module still loaded (DKMS cache) | `sudo ./uninstall.sh && sudo ./install.sh && sudo reboot`                                                                                        |
+| White/blank screen after install            | Stale/missing .dtbo overlay          | Re-run `sudo ./install.sh` to recompile overlays from .dts sources                                                                               |
+| No boot logo on SPI display                 | Plymouth `splash` in cmdline.txt     | Re-run `sudo ./install.sh` (it removes `splash` and sets `fbcon=map:1`)                                                                          |
+| Console appears on HDMI, not SPI display    | `fbcon=map:1` missing from cmdline   | Re-run `sudo ./install.sh`; verify `fbcon=map:1` is in `/boot/firmware/cmdline.txt`                                                              |
+| `modprobe: FATAL: Module ili9481 not found` | Module not installed or wrong kernel | Run `sudo ./install.sh` or `sudo make install-dkms`                                                                                              |
+| Colors inverted                             | Missing inversion command            | Driver includes `ENTER_INVERT_MODE` by default; check your panel datasheet                                                                       |
+| `No such device` on `/dev/fb0`              | Overlay not loaded                   | Verify `dtoverlay=ili9481` is in `/boot/config.txt` and reboot                                                                                   |
+| Garbled display                             | Incorrect rotation                   | Try `rotate=0` (default) first                                                                                                                   |
+| Touch not working                           | XPT2046 overlay not loaded           | Verify `dtoverlay=xpt2046` is in `/boot/config.txt`; check wiring                                                                                |
+| Touch coordinates misaligned                | Needs calibration                    | Run `DISPLAY=:0 xinput_calibrator` and update CalibrationMatrix                                                                                  |
+| Desktop/Wayland on HDMI, not SPI display    | Wayland compositor using card0 (vc4) | Re-run install script; verify `WLR_DRM_DEVICES=/dev/dri/card1` in `/etc/environment.d/99-ili9481.conf` and `/etc/labwc/environment`, then reboot |
+| Desktop/X11 on HDMI, not SPI display        | X11 modesetting using wrong DRM card | Re-run install script; verify `Option "kmsdev" "/dev/dri/card1"` in `/etc/X11/xorg.conf.d/99-ili9481.conf`                                       |
+| Mouse/keyboard laggy                        | SPI speed too high causing CPU load  | Lower `speed` parameter in `/boot/config.txt` overlay line                                                                                       |
 
 ## License
 
