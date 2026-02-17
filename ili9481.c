@@ -31,8 +31,14 @@
 
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_drv.h>
-#include <drm/drm_fbdev_generic.h>
 #include <drm/drm_gem_dma_helper.h>
+
+#include <linux/version.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
+#include <drm/drm_fbdev_dma.h>
+#else
+#include <drm/drm_fbdev_generic.h>
+#endif
 #include <drm/drm_mipi_dbi.h>
 #include <drm/drm_modeset_helper.h>
 #include <drm/drm_print.h>
@@ -213,7 +219,11 @@ static int ili9481_probe(struct spi_device *spi)
 
 	spi_set_drvdata(spi, drm);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
+	drm_fbdev_dma_setup(drm, 0);
+#else
 	drm_fbdev_generic_setup(drm, 0);
+#endif
 
 	dev_info(dev, "ILI9481 display registered (%ux%u, rotation %u°)\n",
 		 ili9481_mode.hdisplay, ili9481_mode.vdisplay, rotation);
