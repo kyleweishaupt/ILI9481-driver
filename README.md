@@ -146,7 +146,7 @@ dtoverlay=ili9481,speed=16000000,rotate=90,dc=22,reset=27
 
 | Parameter | Default  | Description                        |
 | --------- | -------- | ---------------------------------- |
-| `speed`   | 32000000 | SPI clock frequency in Hz          |
+| `speed`   | 16000000 | SPI clock frequency in Hz          |
 | `rotate`  | 0        | Display rotation (0, 90, 180, 270) |
 | `dc`      | 22       | GPIO number for Data/Command pin   |
 | `reset`   | 27       | GPIO number for Reset pin          |
@@ -248,12 +248,16 @@ If you previously used the `fbtft_device` or `fb_ili9481` kernel module:
 
 | Symptom                                     | Possible Cause                       | Fix                                                                        |
 | ------------------------------------------- | ------------------------------------ | -------------------------------------------------------------------------- |
-| White/blank screen                          | Wrong SPI speed or wiring            | Lower `speed` to 16 MHz; check DC/RST wiring                               |
+| White/blank screen                          | Wrong GPIO polarity or SPI speed     | Ensure reset-gpios uses active-low flag; lower `speed` to 16 MHz or less   |
+| White/blank screen after install            | Stale/missing .dtbo overlay          | Re-run `sudo ./install.sh` to recompile overlays from .dts sources         |
 | `modprobe: FATAL: Module ili9481 not found` | Module not installed or wrong kernel | Run `sudo make install` or `sudo make install-dkms`                        |
 | Colors inverted                             | Missing inversion command            | Driver includes `ENTER_INVERT_MODE` by default; check your panel datasheet |
 | `No such device` on `/dev/fb0`              | Overlay not loaded                   | Verify `dtoverlay=ili9481` is in `/boot/config.txt` and reboot             |
 | Garbled display                             | Incorrect rotation                   | Try `rotate=0` (default) first                                             |
-| Touch not working                           | XPT2046 overlay not loaded           | See Touchscreen section above                                              |
+| Touch not working                           | XPT2046 overlay not loaded           | Verify `dtoverlay=xpt2046` is in `/boot/config.txt`; check wiring          |
+| Touch coordinates misaligned                | Needs calibration                    | Run `DISPLAY=:0 xinput_calibrator` and update CalibrationMatrix            |
+| Desktop appears on HDMI, not SPI display    | X11 not configured for ili9481       | Re-run install script (creates `/etc/X11/xorg.conf.d/99-ili9481.conf`)     |
+| Mouse/keyboard laggy                        | SPI speed too high causing CPU load  | Lower `speed` parameter in `/boot/config.txt` overlay line                 |
 
 ## License
 

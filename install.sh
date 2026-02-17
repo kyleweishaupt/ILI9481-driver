@@ -24,15 +24,23 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DTBO="$SCRIPT_DIR/ili9481.dtbo"
 TOUCH_DTBO="$SCRIPT_DIR/xpt2046.dtbo"
+DTS_SRC="$SCRIPT_DIR/ili9481-overlay.dts"
+TOUCH_DTS_SRC="$SCRIPT_DIR/xpt2046-overlay.dts"
 
 # Source files for DKMS
 SRC_FILES=(ili9481.c Makefile Kconfig dkms.conf)
-for f in "$DTBO" "$SCRIPT_DIR/ili9481.c" "$SCRIPT_DIR/dkms.conf"; do
+for f in "$SCRIPT_DIR/ili9481.c" "$SCRIPT_DIR/dkms.conf"; do
     if [ ! -f "$f" ]; then
         echo "Error: Required file not found: $f"
         exit 1
     fi
 done
+
+# At least one of .dtbo or .dts must exist for the display overlay
+if [ ! -f "$DTBO" ] && [ ! -f "$DTS_SRC" ]; then
+    echo "Error: Neither ili9481.dtbo nor ili9481-overlay.dts found"
+    exit 1
+fi
 
 # ── Parse dkms.conf ──────────────────────────────────────────────────
 
@@ -55,7 +63,7 @@ if [ -d "/boot/firmware/overlays" ]; then
 fi
 
 STEP=1
-TOTAL=7
+TOTAL=9
 
 echo "ILI9481 Display Driver Installer"
 echo "================================"
@@ -80,11 +88,28 @@ STEP=$((STEP + 1))
 
 # ── 2. Install dependencies ─────────────────────────────────────────
 
-echo "[$STEP/$TOTAL] Installing DKMS and kernel headers ..."
+echo "[$STEP/$TOTAL] Installing DKMS, kernel headers, and device-tree compiler ..."
 apt-get update -qq
-apt-get install -y -qq dkms raspberrypi-kernel-headers 2>/dev/null \
-  || apt-get install -y -qq dkms "linux-headers-${KVER}"
+apt-get install -y -qq dkms device-tree-compiler raspberrypi-kernel-headers 2>/dev/null \
+  || apt-get install -y -qq dkms device-tree-compiler "linux-headers-${KVER}"
 echo "  Done"
+STEP=$((STEP + 1))
+
+# ── Compile device-tree overlays if needed ───────────────────────────
+
+echo "[$STEP/$TOTAL] Compiling device-tree overlays ..."
+if [ -f "$DTS_SRC" ]; then
+    dtc -@ -Hepapr -I dts -O dtb -o "$DTBO" "$DTS_SRC" 2>/dev/null
+    echo "  Compiled ili9481-overlay.dts → ili9481.dtbo"
+else
+    echo "  Using pre-compiled ili9481.dtbo"
+fi
+if [ -f "$TOUCH_DTS_SRC" ]; then
+    dtc -@ -Hepapr -I dts -O dtb -o "$TOUCH_DTBO" "$TOUCH_DTS_SRC" 2>/dev/null
+    echo "  Compiled xpt2046-overlay.dts → xpt2046.dtbo"
+else
+    echo "  Using pre-compiled xpt2046.dtbo (or not present)"
+fi
 STEP=$((STEP + 1))
 
 # ── 3. Build & install via DKMS ──────────────────────────────────────
@@ -162,15 +187,129 @@ STEP=$((STEP + 1))
 
 echo "[$STEP/$TOTAL] Configuring framebuffer console ..."
 if [ -f "$CMDLINE" ]; then
-    if ! grep -q "fbcon=map:10" "$CMDLINE"; then
-        sed -i 's/$/ fbcon=map:10/' "$CMDLINE"
-        echo "  Added fbcon=map:10 to $CMDLINE"
-    else
-        echo "  Already configured — skipping."
-    fi
+    # Remove any old fbcon=map: setting first
+    sed -i 's/ fbcon=map:[0-9]*//g' "$CMDLINE"
+    # Map all virtual consoles to fb1 (ILI9481, since HDMI is usually fb0)
+    sed -i 's/$/ fbcon=map:1/' "$CMDLINE"
+    echo "  Set fbcon=map:1 in $CMDLINE"
 else
-    echo "  Warning: $CMDLINE not found — add 'fbcon=map:10' manually."
+    echo "  Warning: $CMDLINE not found — add 'fbcon=map:1' manually."
 fi
+STEP=$((STEP + 1))
+
+# ── 7. Configure X11 to use ILI9481 as primary display ──────────────
+
+echo "[$STEP/$TOTAL] Configuring display output ..."
+XORG_CONF_DIR="/etc/X11/xorg.conf.d"
+XORG_CONF="$XORG_CONF_DIR/99-ili9481.conf"
+mkdir -p "$XORG_CONF_DIR"
+cat > "$XORG_CONF" <<'XEOF'
+# Route X11 display output to the ILI9481 SPI display.
+# The DRM driver creates /dev/dri/cardN — modesetting picks it up by name.
+
+Section "Device"
+    Identifier  "ILI9481"
+    Driver      "modesetting"
+    Option      "kmsdev" ""
+    # The kmsdev path is filled at boot by the udev helper below.
+    # If only the SPI display is wanted, you can hardcode e.g. /dev/dri/card1
+EndSection
+
+# Prefer the ILI9481 output over HDMI
+Section "Screen"
+    Identifier  "SPI-Screen"
+    Device      "ILI9481"
+EndSection
+
+Section "ServerLayout"
+    Identifier  "Layout"
+    Screen      "SPI-Screen"
+EndSection
+XEOF
+echo "  Created $XORG_CONF"
+
+# Also install a helper script that finds the correct DRM card at boot
+HELPER="/usr/local/bin/ili9481-find-card"
+cat > "$HELPER" <<'HEOF'
+#!/bin/bash
+# Find the /dev/dri/cardN belonging to the ili9481 driver
+for card in /sys/class/drm/card*/device/driver/module; do
+    mod=$(basename "$(readlink -f "$card")" 2>/dev/null)
+    if [ "$mod" = "ili9481" ]; then
+        CARD="/dev/dri/$(basename "$(dirname "$(dirname "$(dirname "$card")")")")"
+        # Update the X11 config with the correct card path
+        if [ -f /etc/X11/xorg.conf.d/99-ili9481.conf ]; then
+            sed -i "s|\"kmsdev\".*|\"kmsdev\" \"$CARD\"|" /etc/X11/xorg.conf.d/99-ili9481.conf
+        fi
+        echo "$CARD"
+        exit 0
+    fi
+done
+echo "ili9481 DRM card not found" >&2
+exit 1
+HEOF
+chmod +x "$HELPER"
+echo "  Created $HELPER"
+
+# Run the helper at boot before the display manager starts
+SYSTEMD_SVC="/etc/systemd/system/ili9481-display.service"
+cat > "$SYSTEMD_SVC" <<SEOF
+[Unit]
+Description=Configure ILI9481 SPI display as primary
+DefaultDependencies=no
+Before=display-manager.service lightdm.service gdm.service
+
+[Service]
+Type=oneshot
+ExecStart=$HELPER
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+SEOF
+systemctl daemon-reload
+systemctl enable ili9481-display.service 2>/dev/null || true
+echo "  Enabled ili9481-display.service"
+STEP=$((STEP + 1))
+
+# ── 8. Configure touchscreen input ──────────────────────────────────
+
+echo "[$STEP/$TOTAL] Configuring touchscreen input ..."
+
+# libinput / evdev config for XPT2046
+TOUCH_XORG="/etc/X11/xorg.conf.d/99-xpt2046-touch.conf"
+cat > "$TOUCH_XORG" <<'TEOF'
+# XPT2046 resistive touchscreen input configuration
+# Adjust CalibrationMatrix if touch coordinates are misaligned.
+
+Section "InputClass"
+    Identifier      "XPT2046 Touchscreen"
+    MatchProduct    "ADS7846 Touchscreen"
+    MatchDevicePath "/dev/input/event*"
+    Driver          "evdev"
+
+    # Identity matrix (no transformation) — adjust after calibration:
+    #   For 0°   rotation: 1 0 0 0 1 0 0 0 1
+    #   For 90°  rotation: 0 1 0 -1 0 1 0 0 1
+    #   For 180° rotation: -1 0 1 0 -1 1 0 0 1
+    #   For 270° rotation: 0 -1 1 1 0 0 0 0 1
+    Option "CalibrationMatrix" "1 0 0 0 1 0 0 0 1"
+
+    Option "InvertY"    "false"
+    Option "InvertX"    "false"
+    Option "SwapAxes"   "false"
+EndSection
+TEOF
+echo "  Created $TOUCH_XORG"
+
+# udev rule to tag the XPT2046 as a touchscreen for libinput
+TOUCH_UDEV="/etc/udev/rules.d/99-xpt2046.rules"
+cat > "$TOUCH_UDEV" <<'UEOF'
+# Tag ADS7846/XPT2046 as a touchscreen so libinput handles it correctly
+ACTION=="add|change", KERNEL=="event*", ATTRS{name}=="ADS7846 Touchscreen", \
+    ENV{ID_INPUT_TOUCHSCREEN}="1"
+UEOF
+echo "  Created $TOUCH_UDEV"
 STEP=$((STEP + 1))
 
 # ── Done ─────────────────────────────────────────────────────────────
@@ -180,14 +319,22 @@ echo "Installation complete!  Reboot to activate."
 echo ""
 echo "  sudo reboot"
 echo ""
-echo "After reboot:"
+echo "After reboot, verify with:"
 echo "  dmesg | grep ili9481"
 echo "  cat /proc/bus/input/devices | grep -A5 -i touch"
+echo "  ls -l /dev/dri/card*"
+echo ""
+echo "If the display works but touch coordinates are off, calibrate:"
+echo "  sudo apt-get install -y xinput-calibrator"
+echo "  DISPLAY=:0 xinput_calibrator"
 echo ""
 echo "To uninstall:"
 echo "  sudo dkms remove ${DKMS_NAME}/${DKMS_VERSION} --all"
 echo "  sudo rm -rf $DKMS_SRC"
-echo "  sudo rm $OVERLAYS_DIR/ili9481.dtbo $OVERLAYS_DIR/xpt2046.dtbo"
-echo "  sudo rm $BLACKLIST_CONF"
+echo "  sudo rm -f $OVERLAYS_DIR/ili9481.dtbo $OVERLAYS_DIR/xpt2046.dtbo"
+echo "  sudo rm -f $BLACKLIST_CONF"
+echo "  sudo rm -f $XORG_CONF $TOUCH_XORG $TOUCH_UDEV"
+echo "  sudo rm -f $HELPER $SYSTEMD_SVC"
+echo "  sudo systemctl disable ili9481-display.service 2>/dev/null"
 echo "  # Remove dtoverlay=ili9481, dtoverlay=xpt2046, dtparam=spi=on from $CONFIG"
-echo "  # Remove fbcon=map:10 from $CMDLINE"
+echo "  # Remove fbcon=map:1 from $CMDLINE"
