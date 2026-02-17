@@ -8,6 +8,7 @@
  * Init sequence sourced from TFT_eSPI ILI9481_INIT_1
  */
 
+#include <linux/backlight.h>
 #include <linux/delay.h>
 #include <linux/module.h>
 #include <linux/property.h>
