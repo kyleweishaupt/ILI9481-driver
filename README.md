@@ -27,6 +27,31 @@ Raspberry Pi but usable on any Linux SPI host with kernel ≥ 6.2.
 **Kernel requirement:** ≥ 6.2 (uses `drm_gem_dma_helper.h` and
 `DRM_MIPI_DBI_SIMPLE_DISPLAY_PIPE_FUNCS`)
 
+## Install (pre-built — no compiling needed)
+
+The easiest way to install. Pre-built drivers for Raspberry Pi (arm64) are
+available from the
+[GitHub Actions](https://github.com/kyleweishaupt/ILI9481-driver/actions)
+build artifacts.
+
+1. Go to the latest successful **Build ILI9481 Kernel Module** workflow run
+2. Download the **ili9481-arm64-rpi-6.6.y** artifact (zip file)
+3. Copy the zip to your Raspberry Pi and run:
+
+```bash
+unzip ili9481-arm64-rpi-6.6.y.zip
+sudo bash install.sh
+sudo reboot
+```
+
+The install script copies the kernel module and device-tree overlay to the
+correct locations and adds `dtoverlay=ili9481` to `/boot/config.txt`
+automatically.
+
+> **Note:** The pre-built module is compiled against a specific kernel
+> version. If your running kernel doesn't match, you may need to build
+> from source instead (see Quick Start below) or use DKMS.
+
 ## Wiring
 
 Default pin assignment (matches the included device-tree overlay):
@@ -208,6 +233,7 @@ If you previously used the `fbtft_device` or `fb_ili9481` kernel module:
 ├── Makefile                # Build system (module + overlay + install)
 ├── Kconfig                 # Kernel config entry
 ├── dkms.conf               # DKMS configuration
+├── install.sh              # One-command installer for pre-built artifacts
 ├── scripts/
 │   └── test-display.sh     # Display test script
 ├── docs/

@@ -27,7 +27,7 @@ OVERLAYS_DIR := /boot/overlays
 
 # DKMS
 DKMS_NAME    := $(MODULE_NAME)
-DKMS_VERSION := $(shell sed -n 's/^PACKAGE_VERSION="\(.*\)"/\1/p' dkms.conf)
+DKMS_VERSION  = $(shell sed -n 's/^PACKAGE_VERSION="\(.*\)"/\1/p' $(src:%=%/)dkms.conf 2>/dev/null || echo 1.0.0)
 DKMS_SRC     := /usr/src/$(DKMS_NAME)-$(DKMS_VERSION)
 
 # ── Build targets ────────────────────────────────────────────────────
