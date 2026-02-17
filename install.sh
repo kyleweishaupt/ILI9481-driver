@@ -205,12 +205,18 @@ STEP=$((STEP + 1))
 
 echo "[$STEP/$TOTAL] Configuring framebuffer console ..."
 if [ -f "$CMDLINE" ]; then
-    # Remove any old fbcon=map: setting first
-    sed -i 's/ fbcon=map:[0-9]*//g' "$CMDLINE"
-    # Map console to the ILI9481 framebuffer.
-    # The ili9481 DRM driver claims fb0, so map console to fb0.
-    sed -i 's/$/ fbcon=map:0/' "$CMDLINE"
+    # Remove stale fbcon mapping from any previous install
+    sed -i 's/ fbcon=map:[^ ]*//g' "$CMDLINE"
+    # Remove 'splash' — Plymouth only renders on HDMI/DSI, not SPI.
+    # Without this the SPI display stays blank until Plymouth exits.
+    sed -i 's/ splash//g' "$CMDLINE"
+    # Remove logo.nologo if present so the Raspberry Pi boot logo appears
+    sed -i 's/ logo\.nologo//g' "$CMDLINE"
+    # Map primary console to fb0 (the ILI9481 framebuffer).
+    # The ILI9481 DRM driver registers first and claims fb0.
+    sed -i '1s/$/ fbcon=map:0/' "$CMDLINE"
     echo "  Set fbcon=map:0 in $CMDLINE"
+    echo "  Removed 'splash' for SPI display boot visibility"
 else
     echo "  Warning: $CMDLINE not found — add 'fbcon=map:0' manually."
 fi
@@ -357,12 +363,4 @@ echo "  sudo apt-get install -y xinput-calibrator"
 echo "  DISPLAY=:0 xinput_calibrator"
 echo ""
 echo "To uninstall:"
-echo "  sudo dkms remove ${DKMS_NAME}/${DKMS_VERSION} --all"
-echo "  sudo rm -rf $DKMS_SRC"
-echo "  sudo rm -f $OVERLAYS_DIR/ili9481.dtbo $OVERLAYS_DIR/xpt2046.dtbo"
-echo "  sudo rm -f $BLACKLIST_CONF"
-echo "  sudo rm -f $XORG_CONF $TOUCH_XORG $TOUCH_UDEV"
-echo "  sudo rm -f $HELPER $SYSTEMD_SVC"
-echo "  sudo systemctl disable ili9481-display.service 2>/dev/null"
-echo "  # Remove dtoverlay=ili9481, dtoverlay=xpt2046, dtparam=spi=on from $CONFIG"
-echo "  # Remove fbcon=map:0 from $CMDLINE"
+echo "  sudo ./uninstall.sh"

@@ -172,9 +172,9 @@ translates this to the ILI9481 MADCTL register:
 
 | Rotation | MADCTL | Effective Resolution  |
 | -------- | ------ | --------------------- |
-| 0°       | 0x09   | 320 × 480 (portrait)  |
+| 0°       | 0x0A   | 320 × 480 (portrait)  |
 | 90°      | 0x28   | 480 × 320 (landscape) |
-| 180°     | 0x0A   | 320 × 480 (portrait)  |
+| 180°     | 0x09   | 320 × 480 (portrait)  |
 | 270°     | 0x2B   | 480 × 320 (landscape) |
 
 ## Testing & Validation
@@ -213,22 +213,34 @@ If you previously used the `fbtft_device` or `fb_ili9481` kernel module:
 5. For modern applications, use the DRM/KMS device directly
    (`/dev/dri/card*`)
 
+## Uninstalling
+
+A dedicated uninstall script cleanly reverses all changes made by the
+installer:
+
+```bash
+sudo ./uninstall.sh
+sudo reboot
+```
+
+This removes the DKMS module, device-tree overlays, boot config entries,
+X11 display configuration, touchscreen settings, and the systemd helper
+service. SPI and DRM/KMS settings are preserved since other hardware may
+depend on them.
+
 ## Repository Structure
 
 ```
 ├── ili9481.c               # Kernel module source (DRM/KMS driver)
 ├── ili9481-overlay.dts     # Device Tree overlay source
+├── xpt2046-overlay.dts     # XPT2046 touchscreen overlay source
 ├── Makefile                # Build system (module + overlay + install)
 ├── Kconfig                 # Kernel config entry
 ├── dkms.conf               # DKMS configuration
-├── install.sh              # One-command installer for pre-built artifacts
+├── install.sh              # One-command installer
+├── uninstall.sh            # One-command uninstaller
 ├── scripts/
 │   └── test-display.sh     # Display test script
-├── docs/
-│   └── xpt2046-overlay.dts # Standalone touchscreen overlay example
-├── .github/
-│   └── workflows/
-│       └── build.yml       # CI cross-compilation workflow
 └── README.md               # This file
 ```
 
@@ -236,9 +248,11 @@ If you previously used the `fbtft_device` or `fb_ili9481` kernel module:
 
 | Symptom                                     | Possible Cause                       | Fix                                                                        |
 | ------------------------------------------- | ------------------------------------ | -------------------------------------------------------------------------- |
-| White/blank screen                          | Wrong GPIO polarity or SPI speed     | Ensure reset-gpios uses active-low flag; lower `speed` to 16 MHz or less   |
+| White/blank screen                          | Init sequence skipped (MISO float)   | Update driver to v1.1+; re-run `sudo ./install.sh` and reboot              |
+| White screen persists after update          | Old module still loaded (DKMS cache) | `sudo ./uninstall.sh && sudo ./install.sh && sudo reboot`                  |
 | White/blank screen after install            | Stale/missing .dtbo overlay          | Re-run `sudo ./install.sh` to recompile overlays from .dts sources         |
-| `modprobe: FATAL: Module ili9481 not found` | Module not installed or wrong kernel | Run `sudo make install` or `sudo make install-dkms`                        |
+| No boot logo on SPI display                 | Plymouth `splash` in cmdline.txt     | Re-run `sudo ./install.sh` (it removes `splash` from cmdline.txt)          |
+| `modprobe: FATAL: Module ili9481 not found` | Module not installed or wrong kernel | Run `sudo ./install.sh` or `sudo make install-dkms`                        |
 | Colors inverted                             | Missing inversion command            | Driver includes `ENTER_INVERT_MODE` by default; check your panel datasheet |
 | `No such device` on `/dev/fb0`              | Overlay not loaded                   | Verify `dtoverlay=ili9481` is in `/boot/config.txt` and reboot             |
 | Garbled display                             | Incorrect rotation                   | Try `rotate=0` (default) first                                             |

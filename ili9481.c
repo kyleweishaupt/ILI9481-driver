@@ -57,34 +57,45 @@ static void ili9481_enable(struct drm_simple_display_pipe *pipe,
 			   struct drm_plane_state *plane_state)
 {
 	struct mipi_dbi_dev *dbidev = drm_to_mipi_dbi_dev(pipe->crtc.dev);
+	struct device *dev = pipe->crtc.dev->dev;
 	struct mipi_dbi *dbi = &dbidev->dbi;
 	u8 addr_mode;
-	int ret, idx;
+	int idx;
 
 	if (!drm_dev_enter(pipe->crtc.dev, &idx))
 		return;
 
-	drm_dbg_driver(pipe->crtc.dev, "Initialising ILI9481 display\n");
+	dev_info(dev, "ili9481_enable: starting display init\n");
 
-	ret = mipi_dbi_poweron_conditional_reset(dbidev);
-	if (ret < 0) {
-		drm_err(pipe->crtc.dev, "Failed to reset display: %d\n", ret);
-		goto out_exit;
-	}
 	/*
-	 * Always run the full init sequence — do NOT skip when ret == 1.
+	 * Bypass mipi_dbi_poweron_conditional_reset() entirely.
 	 *
-	 * mipi_dbi_poweron_conditional_reset() reads the power-mode
-	 * register (0x0A) over SPI to decide whether the panel is
-	 * already awake.  Many ILI9481 modules leave MISO unconnected,
-	 * so the read returns 0xFF (pulled-up or floating), which the
-	 * helper misinterprets as "display already on" and returns 1.
-	 * Skipping the init in that case leaves the display white.
+	 * That helper tries to detect whether the panel is already
+	 * running by reading the power-mode register (0x0A) over SPI.
+	 * This fails in two common ways on cheap ILI9481 SPI modules:
 	 *
-	 * Re-initialising an already-running panel is harmless and
-	 * takes only a few milliseconds, so always doing it is the
-	 * safest approach.
+	 *  1. MISO is unconnected → read returns 0xFF → helper thinks
+	 *     the display is already alive → returns 1 → init skipped.
+	 *
+	 *  2. SPI transfer of the NOP verification command fails for
+	 *     timing reasons → helper returns -errno → enable aborts
+	 *     via goto out_exit → init skipped.
+	 *
+	 * Both leave the display in its default white state.
+	 *
+	 * Instead we unconditionally:
+	 *   - Toggle the hardware reset GPIO (if present), or
+	 *   - Issue a software reset (if no reset GPIO).
+	 * Then always run the full init sequence.
 	 */
+	if (dbi->reset) {
+		mipi_dbi_hw_reset(dbi);
+		dev_info(dev, "ili9481_enable: hardware reset done\n");
+	} else {
+		mipi_dbi_command(dbi, MIPI_DCS_SOFT_RESET);
+		msleep(120);
+		dev_info(dev, "ili9481_enable: software reset done (no reset GPIO)\n");
+	}
 
 	/* Exit Sleep Mode — ILI9481 needs ≥120 ms before further cmds */
 	mipi_dbi_command(dbi, MIPI_DCS_EXIT_SLEEP_MODE);
@@ -116,9 +127,12 @@ static void ili9481_enable(struct drm_simple_display_pipe *pipe,
 	/* Interface Pixel Format: RGB565 for both DBI and DPI */
 	mipi_dbi_command(dbi, MIPI_DCS_SET_PIXEL_FORMAT, 0x55);
 
+	dev_info(dev, "ili9481_enable: init commands sent, turning display on\n");
+
 	/* Display ON */
 	mipi_dbi_command(dbi, MIPI_DCS_SET_DISPLAY_ON);
 	msleep(25);
+
 	/*
 	 * Set rotation via MADCTL.
 	 *
@@ -146,13 +160,14 @@ static void ili9481_enable(struct drm_simple_display_pipe *pipe,
 		break;
 	}
 	mipi_dbi_command(dbi, MIPI_DCS_SET_ADDRESS_MODE, addr_mode);
-	drm_dbg_driver(pipe->crtc.dev,
-		       "Rotation %u°, MADCTL=0x%02x\n",
-		       dbidev->rotation, addr_mode);
+
+	dev_info(dev, "ili9481_enable: rotation %u°, MADCTL=0x%02x, flushing fb\n",
+		 dbidev->rotation, addr_mode);
 
 	mipi_dbi_enable_flush(dbidev, crtc_state, plane_state);
 
-out_exit:
+	dev_info(dev, "ili9481_enable: display init complete\n");
+
 	drm_dev_exit(idx);
 }
 
@@ -173,9 +188,9 @@ static const struct drm_driver ili9481_driver = {
 	.debugfs_init		= mipi_dbi_debugfs_init,
 	.name			= "ili9481",
 	.desc			= "Ilitek ILI9481",
-	.date			= "20260216",
+	.date			= "20260217",
 	.major			= 1,
-	.minor			= 0,
+	.minor			= 1,
 };
 
 static int ili9481_probe(struct spi_device *spi)
