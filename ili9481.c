@@ -42,8 +42,6 @@
 #include <drm/drm_mipi_dbi.h>
 #include <drm/drm_modeset_helper.h>
 #include <drm/drm_print.h>
-#include <drm/drm_framebuffer.h>
-#include <drm/drm_fb_dma_helper.h>
 
 /* ILI9481-specific register definitions */
 #define ILI9481_PWRSET    0xD0   /* Power Setting */
@@ -56,6 +54,10 @@
 #define ILI9481_IFCTL     0xC6   /* Interface Control */
 #define ILI9481_DISPTIM   0xC1   /* Display Timing for Normal Mode */
 
+static const struct drm_display_mode ili9481_mode = {
+	DRM_SIMPLE_MODE(320, 480, 49, 73),
+};
+
 static void ili9481_enable(struct drm_simple_display_pipe *pipe,
 			   struct drm_crtc_state *crtc_state,
 			   struct drm_plane_state *plane_state)
@@ -63,9 +65,8 @@ static void ili9481_enable(struct drm_simple_display_pipe *pipe,
 	struct mipi_dbi_dev *dbidev = drm_to_mipi_dbi_dev(pipe->crtc.dev);
 	struct device *dev = pipe->crtc.dev->dev;
 	struct mipi_dbi *dbi = &dbidev->dbi;
-	struct drm_framebuffer *fb = plane_state->fb;
 	u8 addr_mode;
-	int idx, ret;
+	int idx;
 
 	if (!drm_dev_enter(pipe->crtc.dev, &idx))
 		return;
@@ -187,17 +188,13 @@ static void ili9481_enable(struct drm_simple_display_pipe *pipe,
 	mipi_dbi_command(dbi, MIPI_DCS_SET_PIXEL_FORMAT, 0x55);
 
 	/*
-	 * Set the full-screen GRAM write window explicitly.
-	 * Some panels need this before they will accept pixel data.
+	 * Set full-screen GRAM write window explicitly.
+	 * Some panels require this before accepting memory writes.
 	 */
 	mipi_dbi_command(dbi, MIPI_DCS_SET_COLUMN_ADDRESS,
-			 0x00, 0x00,
-			 (u8)((ili9481_mode.hdisplay - 1) >> 8),
-			 (u8)((ili9481_mode.hdisplay - 1) & 0xFF));
+			 0x00, 0x00, 0x01, 0x3F); /* 0 .. 319 */
 	mipi_dbi_command(dbi, MIPI_DCS_SET_PAGE_ADDRESS,
-			 0x00, 0x00,
-			 (u8)((ili9481_mode.vdisplay - 1) >> 8),
-			 (u8)((ili9481_mode.vdisplay - 1) & 0xFF));
+			 0x00, 0x00, 0x01, 0xDF); /* 0 .. 479 */
 
 	dev_info(dev, "ili9481_enable: init commands sent (MADCTL=0x%02x), turning display on\n",
 		 addr_mode);
@@ -206,61 +203,10 @@ static void ili9481_enable(struct drm_simple_display_pipe *pipe,
 	mipi_dbi_command(dbi, MIPI_DCS_SET_DISPLAY_ON);
 	msleep(100);
 
-	/*
-	 * Log framebuffer state for diagnostics.
-	 * If the first bytes are all 0x00, the buffer is black (expected).
-	 * If 0xFF, something unexpected is happening.
-	 */
-	if (fb) {
-		struct drm_gem_dma_object *dma_obj;
-
-		dma_obj = drm_fb_dma_get_gem_obj(fb, 0);
-		if (dma_obj && dma_obj->vaddr) {
-			u8 *p = dma_obj->vaddr;
-
-			dev_info(dev,
-				 "ili9481_enable: fb %ux%u fmt=0x%08x first 8 bytes: %02x %02x %02x %02x %02x %02x %02x %02x\n",
-				 fb->width, fb->height,
-				 fb->format ? fb->format->format : 0,
-				 p[0], p[1], p[2], p[3],
-				 p[4], p[5], p[6], p[7]);
-		} else {
-			dev_warn(dev, "ili9481_enable: fb GEM object or vaddr is NULL!\n");
-		}
-	} else {
-		dev_warn(dev, "ili9481_enable: plane_state->fb is NULL!\n");
-	}
-
 	dev_info(dev, "ili9481_enable: rotation %u, flushing fb via mipi_dbi_enable_flush\n",
 		 dbidev->rotation);
 
 	mipi_dbi_enable_flush(dbidev, crtc_state, plane_state);
-
-	/*
-	 * Diagnostic: write 8 red pixels at the top-left corner
-	 * directly via the MIPI DBI command interface.
-	 *
-	 * This bypasses the entire DRM/framebuffer pipeline and tests
-	 * whether SPI commands and pixel data actually reach the
-	 * ILI9481's GRAM.  If these pixels are visible (even briefly),
-	 * SPI communication works and the issue is elsewhere.
-	 *
-	 * RGB565 red = 0xF800 → sent big-endian on SPI: 0xF8 0x00
-	 */
-	mipi_dbi_command(dbi, MIPI_DCS_SET_COLUMN_ADDRESS,
-			 0x00, 0x00, 0x00, 0x07);
-	mipi_dbi_command(dbi, MIPI_DCS_SET_PAGE_ADDRESS,
-			 0x00, 0x00, 0x00, 0x00);
-	ret = mipi_dbi_command_buf(dbi, MIPI_DCS_WRITE_MEMORY_START,
-				   (u8[]){
-					   0xF8, 0x00, 0xF8, 0x00,
-					   0xF8, 0x00, 0xF8, 0x00,
-					   0xF8, 0x00, 0xF8, 0x00,
-					   0xF8, 0x00, 0xF8, 0x00,
-				   }, 16);
-	dev_info(dev,
-		 "ili9481_enable: diag pixel write ret=%d (expect 8 red px at 0,0)\n",
-		 ret);
 
 	dev_info(dev, "ili9481_enable: display init complete\n");
 
@@ -269,10 +215,6 @@ static void ili9481_enable(struct drm_simple_display_pipe *pipe,
 
 static const struct drm_simple_display_pipe_funcs ili9481_pipe_funcs = {
 	DRM_MIPI_DBI_SIMPLE_DISPLAY_PIPE_FUNCS(ili9481_enable),
-};
-
-static const struct drm_display_mode ili9481_mode = {
-	DRM_SIMPLE_MODE(320, 480, 49, 73),
 };
 
 DEFINE_DRM_GEM_DMA_FOPS(ili9481_fops);

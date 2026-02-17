@@ -141,12 +141,12 @@ dtoverlay=ili9481
 ### With Optional Parameters
 
 ```ini
-dtoverlay=ili9481,speed=16000000,rotate=90,dc=22,reset=27
+dtoverlay=ili9481,speed=12000000,rotate=90,dc=22,reset=27
 ```
 
 | Parameter | Default  | Description                        |
 | --------- | -------- | ---------------------------------- |
-| `speed`   | 16000000 | SPI clock frequency in Hz          |
+| `speed`   | 12000000 | SPI clock frequency in Hz          |
 | `rotate`  | 0        | Display rotation (0, 90, 180, 270) |
 | `dc`      | 22       | GPIO number for Data/Command pin   |
 | `reset`   | 27       | GPIO number for Reset pin          |
@@ -156,7 +156,7 @@ dtoverlay=ili9481,speed=16000000,rotate=90,dc=22,reset=27
 If your display includes a resistive touch panel driven by an XPT2046
 controller on SPI0 CE1, uncomment `fragment@3` in `ili9481-overlay.dts`
 or add a separate overlay. A standalone touch overlay is provided at
-[`docs/xpt2046-overlay.dts`](docs/xpt2046-overlay.dts) for reference.
+[`xpt2046-overlay.dts`](xpt2046-overlay.dts) for reference.
 
 The default touch wiring assumes:
 
@@ -251,10 +251,10 @@ depend on them.
 | White/blank screen                          | Init sequence skipped (MISO float)   | Update driver to v1.1+; re-run `sudo ./install.sh` and reboot                                                                                    |
 | White screen persists after update          | Old module still loaded (DKMS cache) | `sudo ./uninstall.sh && sudo ./install.sh && sudo reboot`                                                                                        |
 | White/blank screen after install            | Stale/missing .dtbo overlay          | Re-run `sudo ./install.sh` to recompile overlays from .dts sources                                                                               |
-| No boot logo on SPI display                 | Plymouth `splash` in cmdline.txt     | Re-run `sudo ./install.sh` (it removes `splash` and sets `fbcon=map:1`)                                                                          |
-| Console appears on HDMI, not SPI display    | `fbcon=map:1` missing from cmdline   | Re-run `sudo ./install.sh`; verify `fbcon=map:1` is in `/boot/firmware/cmdline.txt`                                                              |
+| No boot logo on SPI display                 | Plymouth `splash` in cmdline.txt     | Re-run `sudo ./install.sh` (it removes `splash`; fbcon mapping is handled dynamically by `ili9481-display.service`)                              |
+| Console appears on HDMI, not SPI display    | fbcon not rebound to ILI9481 fb       | Re-run `sudo ./install.sh`; verify `ili9481-display.service` is enabled and started                                                               |
 | `modprobe: FATAL: Module ili9481 not found` | Module not installed or wrong kernel | Run `sudo ./install.sh` or `sudo make install-dkms`                                                                                              |
-| Colors inverted                             | Missing inversion command            | Driver includes `ENTER_INVERT_MODE` by default; check your panel datasheet                                                                       |
+| Colors inverted                             | Panel-specific inversion behavior     | Check your panel datasheet; adjust inversion command in `ili9481.c` if needed                                                                     |
 | `No such device` on `/dev/fb0`              | Overlay not loaded                   | Verify `dtoverlay=ili9481` is in `/boot/config.txt` and reboot                                                                                   |
 | Garbled display                             | Incorrect rotation                   | Try `rotate=0` (default) first                                                                                                                   |
 | Touch not working                           | XPT2046 overlay not loaded           | Verify `dtoverlay=xpt2046` is in `/boot/config.txt`; check wiring                                                                                |

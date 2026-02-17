@@ -13,7 +13,7 @@
  *   Add to /boot/config.txt: dtoverlay=ili9481
  *
  * Optional overrides:
- *   dtoverlay=ili9481,speed=16000000,rotate=90,dc=22,reset=27
+ *   dtoverlay=ili9481,speed=12000000,rotate=90,dc=22,reset=27
  */
 /dts-v1/;
 /plugin/;
