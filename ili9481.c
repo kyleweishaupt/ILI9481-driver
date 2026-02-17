@@ -101,6 +101,20 @@ static void ili9481_enable(struct drm_simple_display_pipe *pipe,
 	mipi_dbi_command(dbi, MIPI_DCS_EXIT_SLEEP_MODE);
 	msleep(120);
 
+	/*
+	 * Explicitly set operating modes.
+	 *
+	 * After reset the ILI9481 *should* default to Normal + Non‑Idle +
+	 * Non‑Inverted, but some panel variants (and some SPI modules with
+	 * no MISO) end up in an undefined state.  Sending these three
+	 * commands is harmless when the defaults are already correct, and
+	 * fixes white‑screen issues on panels that reset to Partial, Idle,
+	 * or Inverted mode.
+	 */
+	mipi_dbi_command(dbi, MIPI_DCS_EXIT_IDLE_MODE);
+	mipi_dbi_command(dbi, MIPI_DCS_ENTER_NORMAL_MODE);
+	mipi_dbi_command(dbi, MIPI_DCS_EXIT_INVERT_MODE);
+
 	/* Unlock all commands (needed by some ILI9481 panel variants) */
 	mipi_dbi_command(dbi, ILI9481_CMDPROT, 0x00);
 
@@ -124,17 +138,8 @@ static void ili9481_enable(struct drm_simple_display_pipe *pipe,
 			 0x00, 0x32, 0x36, 0x45, 0x06, 0x16,
 			 0x37, 0x75, 0x77, 0x54, 0x0C, 0x00);
 
-	/* Interface Pixel Format: RGB565 for both DBI and DPI */
-	mipi_dbi_command(dbi, MIPI_DCS_SET_PIXEL_FORMAT, 0x55);
-
-	dev_info(dev, "ili9481_enable: init commands sent, turning display on\n");
-
-	/* Display ON */
-	mipi_dbi_command(dbi, MIPI_DCS_SET_DISPLAY_ON);
-	msleep(25);
-
 	/*
-	 * Set rotation via MADCTL.
+	 * Set rotation via MADCTL — BEFORE Display ON and pixel writes.
 	 *
 	 * ILI9481 MADCTL bit layout (differs from ILI9341!):
 	 *   Bit 5: MV  (Row/Column Exchange)  = 0x20
@@ -161,8 +166,18 @@ static void ili9481_enable(struct drm_simple_display_pipe *pipe,
 	}
 	mipi_dbi_command(dbi, MIPI_DCS_SET_ADDRESS_MODE, addr_mode);
 
-	dev_info(dev, "ili9481_enable: rotation %u°, MADCTL=0x%02x, flushing fb\n",
-		 dbidev->rotation, addr_mode);
+	/* Interface Pixel Format: RGB565 for both DBI and DPI */
+	mipi_dbi_command(dbi, MIPI_DCS_SET_PIXEL_FORMAT, 0x55);
+
+	dev_info(dev, "ili9481_enable: init commands sent (MADCTL=0x%02x), turning display on\n",
+		 addr_mode);
+
+	/* Display ON */
+	mipi_dbi_command(dbi, MIPI_DCS_SET_DISPLAY_ON);
+	msleep(25);
+
+	dev_info(dev, "ili9481_enable: rotation %u°, flushing fb\n",
+		 dbidev->rotation);
 
 	mipi_dbi_enable_flush(dbidev, crtc_state, plane_state);
 

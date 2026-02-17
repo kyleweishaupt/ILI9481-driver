@@ -212,14 +212,20 @@ if [ -f "$CMDLINE" ]; then
     sed -i 's/ splash//g' "$CMDLINE"
     # Remove logo.nologo if present so the Raspberry Pi boot logo appears
     sed -i 's/ logo\.nologo//g' "$CMDLINE"
-    # Map primary console to fb1 (the ILI9481 framebuffer).
-    # vc4-kms-v3d always registers first as card0/fb0; the ILI9481
-    # DRM driver registers second as card1/fb1.
-    sed -i '1s/$/ fbcon=map:1/' "$CMDLINE"
-    echo "  Set fbcon=map:1 in $CMDLINE (ILI9481 = fb1 when vc4 is present)"
-    echo "  Removed 'splash' for SPI display boot visibility"
+    #
+    # Do NOT hardcode fbcon=map:N in cmdline.txt.
+    #
+    # The ILI9481 fb number depends on whether vc4 creates an fbdev:
+    #   - HDMI connected → vc4 = fb0, ILI9481 = fb1 → need map:1
+    #   - No HDMI        → vc4 has no fb, ILI9481 = fb0 → need map:0
+    #
+    # The ili9481-display.service detects the correct fb at boot and
+    # remaps fbcon dynamically via /sys/class/vtconsole.
+    #
+    echo "  Cleaned cmdline.txt (removed stale fbcon/splash settings)"
+    echo "  fbcon will be mapped dynamically at boot by ili9481-display.service"
 else
-    echo "  Warning: $CMDLINE not found — add 'fbcon=map:1' manually."
+    echo "  Warning: $CMDLINE not found."
 fi
 STEP=$((STEP + 1))
 
@@ -260,7 +266,7 @@ HELPER="/usr/local/bin/ili9481-find-card"
 cat > "$HELPER" <<'HEOF'
 #!/bin/bash
 # Find the /dev/dri/cardN belonging to the ili9481 driver and configure
-# all display sinks (X11 modesetting, Wayland/wlroots) to use it.
+# all display sinks (X11 modesetting, Wayland/wlroots, fbcon) to use it.
 # Wait up to 30 seconds for the module to load (it loads via DT overlay
 # and DKMS, which can take 10-15s on a Pi 3).
 TIMEOUT=30
@@ -287,6 +293,32 @@ while [ $ELAPSED -lt $TIMEOUT ]; do
             if [ -d /etc/labwc ]; then
                 printf 'WLR_DRM_DEVICES=%s\n' "$CARD_DEV" \
                     > /etc/labwc/environment
+            fi
+
+            # ── Map fbcon to the ILI9481 framebuffer ──────────────
+            # The fb number varies depending on whether vc4 (HDMI)
+            # creates an fbdev.  Detect it dynamically.
+            FB_NUM=""
+            for fb in /sys/class/graphics/fb*; do
+                [ -d "$fb" ] || continue
+                fb_name=$(cat "$fb/name" 2>/dev/null || true)
+                if echo "$fb_name" | grep -qi "ili9481"; then
+                    FB_NUM=$(basename "$fb" | sed 's/fb//')
+                    break
+                fi
+            done
+
+            if [ -n "$FB_NUM" ]; then
+                # Rebind fbcon so it picks up the ILI9481 fb
+                for vtcon in /sys/class/vtconsole/vtcon*; do
+                    [ -d "$vtcon" ] || continue
+                    vtname=$(cat "$vtcon/name" 2>/dev/null || true)
+                    if echo "$vtname" | grep -qi "frame buffer"; then
+                        echo 0 > "$vtcon/bind" 2>/dev/null || true
+                        echo 1 > "$vtcon/bind" 2>/dev/null || true
+                    fi
+                done
+                echo "ili9481: mapped fbcon to fb${FB_NUM}" >&2
             fi
 
             echo "$CARD_DEV"

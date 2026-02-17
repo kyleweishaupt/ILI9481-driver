@@ -37,7 +37,11 @@ fi
 DRM_CARD=""
 for card in /sys/class/drm/card*; do
     [ -d "$card" ] || continue
+    # Try module name first, then fall back to driver link
     driver=$(cat "$card/device/driver/module/name" 2>/dev/null || true)
+    if [ -z "$driver" ]; then
+        driver=$(basename "$(readlink -f "$card/device/driver/module")" 2>/dev/null || true)
+    fi
     if [ "$driver" = "ili9481" ]; then
         DRM_CARD=$(basename "$card")
         break
@@ -48,6 +52,7 @@ if [ -n "$DRM_CARD" ]; then
     pass "DRM device found: /dev/dri/$DRM_CARD"
 else
     fail "No DRM device found for ili9481"
+    info "Check: ls -la /sys/class/drm/card*/device/driver/module 2>/dev/null"
     errors=$((errors + 1))
 fi
 
@@ -78,9 +83,35 @@ else
     info "No ili9481 messages in dmesg (ring buffer may have rotated)"
 fi
 
-# ── 5. Optional: paint test pattern via fbdev ────────────────────────
+# ── 5. Check fbcon mapping ───────────────────────────────────────────
+if [ -n "$FB_DEV" ]; then
+    FB_NUM=$(basename "$FB_DEV" | sed 's/fb//')
+    FBCON_MAP=$(cat /proc/cmdline 2>/dev/null | grep -o 'fbcon=map:[^ ]*' || true)
+    if [ -n "$FBCON_MAP" ]; then
+        MAP_NUM=$(echo "$FBCON_MAP" | sed 's/fbcon=map://')
+        if [ "$MAP_NUM" != "$FB_NUM" ]; then
+            fail "fbcon mapped to fb${MAP_NUM} but ILI9481 is fb${FB_NUM}"
+            info "Fix: edit /boot/firmware/cmdline.txt (or /boot/cmdline.txt)"
+            info "  Change fbcon=map:${MAP_NUM} → fbcon=map:${FB_NUM}"
+            info "  Or remove fbcon=map: entirely and re-run sudo ./install.sh"
+            errors=$((errors + 1))
+        else
+            pass "fbcon correctly mapped to fb${FB_NUM}"
+        fi
+    else
+        info "No fbcon=map: in cmdline (console goes to first available fb)"
+    fi
+fi
+
+# ── 6. Optional: paint test pattern via fbdev ────────────────────────
 if [ -n "$FB_DEV" ] && [ -w "$FB_DEV" ]; then
     echo ""
+
+    # Detect the actual fbdev bits-per-pixel
+    FB_SYS="/sys/class/graphics/$(basename "$FB_DEV")"
+    BPP_BITS=$(cat "$FB_SYS/bits_per_pixel" 2>/dev/null || echo "16")
+    info "Framebuffer format: ${BPP_BITS} bits/pixel"
+
     info "Painting colour bar test pattern to $FB_DEV ..."
 
     # 320×480 @ RGB565 = 307200 bytes (native portrait)
