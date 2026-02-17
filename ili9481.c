@@ -50,6 +50,7 @@
 #define ILI9481_PANELDRV  0xC0   /* Panel Driving Setting */
 #define ILI9481_FRMCTL    0xC5   /* Frame Rate & Inversion Control */
 #define ILI9481_GAMSET    0xC8   /* Gamma Setting */
+#define ILI9481_CMDPROT   0xB0   /* Command Access Protect */
 
 static void ili9481_enable(struct drm_simple_display_pipe *pipe,
 			   struct drm_crtc_state *crtc_state,
@@ -70,12 +71,27 @@ static void ili9481_enable(struct drm_simple_display_pipe *pipe,
 		drm_err(pipe->crtc.dev, "Failed to reset display: %d\n", ret);
 		goto out_exit;
 	}
-	if (ret == 1)
-		goto out_enable;
+	/*
+	 * Always run the full init sequence — do NOT skip when ret == 1.
+	 *
+	 * mipi_dbi_poweron_conditional_reset() reads the power-mode
+	 * register (0x0A) over SPI to decide whether the panel is
+	 * already awake.  Many ILI9481 modules leave MISO unconnected,
+	 * so the read returns 0xFF (pulled-up or floating), which the
+	 * helper misinterprets as "display already on" and returns 1.
+	 * Skipping the init in that case leaves the display white.
+	 *
+	 * Re-initialising an already-running panel is harmless and
+	 * takes only a few milliseconds, so always doing it is the
+	 * safest approach.
+	 */
 
-	/* Exit Sleep Mode */
+	/* Exit Sleep Mode — ILI9481 needs ≥120 ms before further cmds */
 	mipi_dbi_command(dbi, MIPI_DCS_EXIT_SLEEP_MODE);
-	msleep(50);
+	msleep(120);
+
+	/* Unlock all commands (needed by some ILI9481 panel variants) */
+	mipi_dbi_command(dbi, ILI9481_CMDPROT, 0x00);
 
 	/* Power Setting: VCI1=VCI, DDVDH=VCI*2, VGH=VCI*7, VGL=-VCI*4 */
 	mipi_dbi_command(dbi, ILI9481_PWRSET, 0x07, 0x42, 0x18);
@@ -92,18 +108,17 @@ static void ili9481_enable(struct drm_simple_display_pipe *pipe,
 	/* Frame Rate & Inversion Control */
 	mipi_dbi_command(dbi, ILI9481_FRMCTL, 0x03);
 
-	/* Interface Pixel Format: RGB565 for both DBI and DPI */
-	mipi_dbi_command(dbi, MIPI_DCS_SET_PIXEL_FORMAT, 0x55);
-
 	/* Gamma Setting */
 	mipi_dbi_command(dbi, ILI9481_GAMSET,
 			 0x00, 0x32, 0x36, 0x45, 0x06, 0x16,
 			 0x37, 0x75, 0x77, 0x54, 0x0C, 0x00);
 
+	/* Interface Pixel Format: RGB565 for both DBI and DPI */
+	mipi_dbi_command(dbi, MIPI_DCS_SET_PIXEL_FORMAT, 0x55);
+
 	/* Display ON */
 	mipi_dbi_command(dbi, MIPI_DCS_SET_DISPLAY_ON);
-
-out_enable:
+	msleep(25);
 	/*
 	 * Set rotation via MADCTL.
 	 *
@@ -118,13 +133,13 @@ out_enable:
 	switch (dbidev->rotation) {
 	default:
 	case 0:
-		addr_mode = 0x09; /* HF | BGR */
+		addr_mode = 0x0A; /* VF | BGR */
 		break;
 	case 90:
 		addr_mode = 0x28; /* MV | BGR */
 		break;
 	case 180:
-		addr_mode = 0x0A; /* VF | BGR */
+		addr_mode = 0x09; /* HF | BGR */
 		break;
 	case 270:
 		addr_mode = 0x2B; /* MV | HF | VF | BGR */

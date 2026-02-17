@@ -35,11 +35,11 @@ available from the
 build artifacts.
 
 1. Go to the latest successful **Build ILI9481 Kernel Module** workflow run
-2. Download the **ili9481-arm64-rpi-6.6.y** artifact (zip file)
+2. Download the **ili9481-arm64-rpi-6.12.y** artifact (zip file)
 3. Copy the zip to your Raspberry Pi and run:
 
 ```bash
-unzip ili9481-arm64-rpi-6.6.y.zip
+unzip ili9481-arm64-rpi-6.12.y.zip
 sudo bash install.sh
 sudo reboot
 ```
@@ -199,18 +199,6 @@ cat /dev/urandom | head -c $((320*480*2)) > /dev/fb0
 # Or use the included test script
 sudo ./scripts/test-display.sh
 ```
-
-## CI / GitHub Actions
-
-Every push and pull request triggers a cross-compilation build via
-GitHub Actions. The workflow:
-
-1. Clones the Raspberry Pi kernel (`rpi-6.6.y` by default)
-2. Cross-compiles the `.ko` module and `.dtbo` overlay for arm64
-3. Uploads build artifacts (downloadable from the Actions tab)
-
-Manual dispatch allows selecting `rpi-6.6.y` or `rpi-6.12.y`. See
-[`.github/workflows/build.yml`](.github/workflows/build.yml) for details.
 
 ## Migrating from fbtft
 
