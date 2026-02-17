@@ -20,9 +20,11 @@ KDIR    ?= /lib/modules/$(shell uname -r)/build
 DTC     ?= dtc
 INSTALL_MOD_DIR ?= extra
 
-# Device-tree overlay
-DTS_SRC := ili9481-overlay.dts
-DTBO    := ili9481.dtbo
+# Device-tree overlays
+DTS_SRC      := ili9481-overlay.dts
+DTBO         := ili9481.dtbo
+TOUCH_DTS    := xpt2046-overlay.dts
+TOUCH_DTBO   := xpt2046.dtbo
 OVERLAYS_DIR := /boot/overlays
 
 # DKMS
@@ -37,23 +39,27 @@ all: modules dtbo
 modules:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules
 
-dtbo: $(DTBO)
+dtbo: $(DTBO) $(TOUCH_DTBO)
 
 $(DTBO): $(DTS_SRC)
 	$(DTC) -@ -Hepapr -I dts -O dtb -o $@ $<
 
+$(TOUCH_DTBO): $(TOUCH_DTS)
+	$(DTC) -@ -Hepapr -I dts -O dtb -o $@ $<
+
 clean:
 	$(MAKE) -C $(KDIR) M=$(PWD) clean
-	$(RM) $(DTBO)
+	$(RM) $(DTBO) $(TOUCH_DTBO)
 
 # ── Install / Uninstall ─────────────────────────────────────────────
 
 install: modules dtbo
 	$(MAKE) -C $(KDIR) M=$(PWD) INSTALL_MOD_DIR=$(INSTALL_MOD_DIR) modules_install
 	install -D -m 0644 $(DTBO) $(DESTDIR)$(OVERLAYS_DIR)/$(DTBO)
+	install -D -m 0644 $(TOUCH_DTBO) $(DESTDIR)$(OVERLAYS_DIR)/$(TOUCH_DTBO)
 	depmod -a
-	@echo "Module and overlay installed."
-	@echo "Add 'dtoverlay=ili9481' to /boot/config.txt and reboot."
+	@echo "Module and overlays installed."
+	@echo "Add 'dtoverlay=ili9481' and 'dtoverlay=xpt2046' to /boot/config.txt and reboot."
 
 install-dkms:
 	install -d $(DKMS_SRC)
@@ -65,9 +71,10 @@ install-dkms:
 
 uninstall:
 	$(RM) $(DESTDIR)$(OVERLAYS_DIR)/$(DTBO)
+	$(RM) $(DESTDIR)$(OVERLAYS_DIR)/$(TOUCH_DTBO)
 	$(RM) /lib/modules/$(shell uname -r)/$(INSTALL_MOD_DIR)/$(MODULE_NAME).ko*
 	depmod -a
-	@echo "Module and overlay removed."
+	@echo "Module and overlays removed."
 
 uninstall-dkms:
 	dkms remove $(DKMS_NAME)/$(DKMS_VERSION) --all || true

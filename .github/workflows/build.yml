@@ -11,14 +11,14 @@ on:
       kernel_branch:
         description: "Raspberry Pi kernel branch"
         required: true
-        default: "rpi-6.6.y"
+        default: "rpi-6.12.y"
         type: choice
         options:
-          - rpi-6.6.y
           - rpi-6.12.y
+          - rpi-6.6.y
 
 env:
-  KERNEL_BRANCH: ${{ github.event.inputs.kernel_branch || 'rpi-6.6.y' }}
+  KERNEL_BRANCH: ${{ github.event.inputs.kernel_branch || 'rpi-6.12.y' }}
 
 jobs:
   build:
@@ -88,16 +88,19 @@ jobs:
             KBUILD_MODPOST_WARN=1 \
             modules
 
-      - name: Compile device tree overlay
+      - name: Compile device tree overlays
         run: |
           dtc -@ -Hepapr -I dts -O dtb \
             -o ili9481.dtbo ili9481-overlay.dts
+          dtc -@ -Hepapr -I dts -O dtb \
+            -o xpt2046.dtbo xpt2046-overlay.dts
 
       - name: Stage install package
         run: |
           mkdir -p package
           cp ili9481.ko package/
           cp ili9481.dtbo package/
+          cp xpt2046.dtbo package/
           cp install.sh package/
           chmod +x package/install.sh
           # Record build metadata
@@ -114,8 +117,9 @@ jobs:
           file package/ili9481.ko
           modinfo package/ili9481.ko
           echo ""
-          echo "=== Device tree overlay ==="
+          echo "=== Device tree overlays ==="
           file package/ili9481.dtbo
+          file package/xpt2046.dtbo
           echo ""
           echo "=== Build info ==="
           cat package/BUILD_INFO
