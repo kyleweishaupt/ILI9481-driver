@@ -373,19 +373,25 @@ static int ili9481_probe(struct spi_device *spi)
 	device_property_read_u32(dev, "rotation", &rotation);
 
 	ret = mipi_dbi_spi_init(spi, dbi, dc);
-	if (ret)
+	if (ret) {
+		dev_err(dev, "mipi_dbi_spi_init failed: %d\n", ret);
 		return ret;
+	}
 
 	ret = mipi_dbi_dev_init(dbidev, &ili9481_pipe_funcs,
 				&ili9481_mode, rotation);
-	if (ret)
+	if (ret) {
+		dev_err(dev, "mipi_dbi_dev_init failed: %d\n", ret);
 		return ret;
+	}
 
 	drm_mode_config_reset(drm);
 
 	ret = drm_dev_register(drm, 0);
-	if (ret)
+	if (ret) {
+		dev_err(dev, "drm_dev_register failed: %d\n", ret);
 		return ret;
+	}
 
 	spi_set_drvdata(spi, drm);
 
