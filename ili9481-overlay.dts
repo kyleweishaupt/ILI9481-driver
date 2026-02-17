@@ -13,7 +13,7 @@
  *   Add to /boot/config.txt: dtoverlay=ili9481
  *
  * Optional overrides:
- *   dtoverlay=ili9481,speed=12000000,rotate=90,dc=22,reset=27,panel=0
+ *   dtoverlay=ili9481,speed=12000000,rotate=90,dc=22,reset=27,panel=0,cs=0
  *
  * panel values:
  *   0 = ILI9481 (default)
@@ -95,5 +95,6 @@
 		dc      = <&ili9481>, "dc-gpios:4";
 		reset   = <&ili9481>, "reset-gpios:4";
 		panel   = <&ili9481>, "panel:0";
+		cs      = <&ili9481>, "reg:0";
 	};
 };

@@ -432,6 +432,8 @@ MODULE_DEVICE_TABLE(of, ili9481_of_match);
 
 static const struct spi_device_id ili9481_id[] = {
 	{ "ili9481", 0 },
+	{ "ili9486", 0 },
+	{ "ili9488", 0 },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, ili9481_id);
