@@ -1,0 +1,79 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Standalone Device Tree overlay for XPT2046 resistive touchscreen
+ * on Raspberry Pi SPI0 CE1
+ *
+ * Many ILI9481 panels include an XPT2046 (ADS7846-compatible) touch
+ * controller sharing the same SPI bus.  This overlay binds it as a
+ * separate SPI device on CE1.
+ *
+ * Wiring:
+ *   T_CLK  → SPI0 SCLK  (GPIO 11, pin 23)
+ *   T_DIN  → SPI0 MOSI  (GPIO 10, pin 19)
+ *   T_DO   → SPI0 MISO  (GPIO  9, pin 21)
+ *   T_CS   → SPI0 CE1   (GPIO  7, pin 26)
+ *   T_IRQ  → GPIO 25    (pin 22)
+ *
+ * Compile:
+ *   dtc -@ -Hepapr -I dts -O dtb -o xpt2046.dtbo xpt2046-overlay.dts
+ *
+ * Install:
+ *   sudo cp xpt2046.dtbo /boot/overlays/
+ *   Add to /boot/config.txt:
+ *     dtoverlay=xpt2046
+ *
+ * Optional overrides:
+ *   dtoverlay=xpt2046,irq=25,speed=2000000
+ */
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2835";
+
+	/* Enable SPI0 (may already be enabled by the display overlay) */
+	fragment@0 {
+		target = <&spi0>;
+		__overlay__ {
+			status = "okay";
+		};
+	};
+
+	/* Disable default spidev on CE1 */
+	fragment@1 {
+		target = <&spidev1>;
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+
+	/* XPT2046 touch controller on SPI0 CE1 */
+	fragment@2 {
+		target = <&spi0>;
+		__overlay__ {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			xpt2046: xpt2046@1 {
+				compatible = "ti,ads7846";
+				reg = <1>;			/* CE1 */
+				spi-max-frequency = <2000000>;
+
+				interrupt-parent = <&gpio>;
+				interrupts = <25 2>;		/* GPIO 25, falling edge */
+				pendown-gpio = <&gpio 25 1>;	/* GPIO 25, active low */
+
+				/* Calibration — adjust for your specific panel */
+				ti,x-plate-ohms = /bits/ 16 <60>;
+				ti,pressure-max = /bits/ 16 <255>;
+				ti,swap-xy;
+			};
+		};
+	};
+
+	__overrides__ {
+		irq   = <&xpt2046>, "interrupts:0",
+			<&xpt2046>, "pendown-gpio:4";
+		speed = <&xpt2046>, "spi-max-frequency:0";
+	};
+};

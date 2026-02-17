@@ -1,0 +1,113 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# test-display.sh — Quick validation for the ILI9481 DRM display driver
+#
+# Usage:  sudo ./scripts/test-display.sh
+#
+# This script checks that the driver is loaded, the DRM device exists,
+# and optionally paints a colour bar test pattern via the fbdev interface.
+
+set -euo pipefail
+
+RED='\033[0;31m'
+GRN='\033[0;32m'
+YEL='\033[1;33m'
+RST='\033[0m'
+
+pass() { echo -e "${GRN}[PASS]${RST} $*"; }
+fail() { echo -e "${RED}[FAIL]${RST} $*"; }
+info() { echo -e "${YEL}[INFO]${RST} $*"; }
+
+errors=0
+
+# ── 1. Check module is loaded ───────────────────────────────────────
+echo "=== ILI9481 Display Driver Test ==="
+echo ""
+
+if lsmod | grep -q '^ili9481'; then
+    pass "Kernel module 'ili9481' is loaded"
+else
+    fail "Kernel module 'ili9481' is NOT loaded"
+    info "Try: sudo modprobe ili9481"
+    errors=$((errors + 1))
+fi
+
+# ── 2. Check DRM device ─────────────────────────────────────────────
+DRM_CARD=""
+for card in /sys/class/drm/card*; do
+    [ -d "$card" ] || continue
+    driver=$(cat "$card/device/driver/module/name" 2>/dev/null || true)
+    if [ "$driver" = "ili9481" ]; then
+        DRM_CARD=$(basename "$card")
+        break
+    fi
+done
+
+if [ -n "$DRM_CARD" ]; then
+    pass "DRM device found: /dev/dri/$DRM_CARD"
+else
+    fail "No DRM device found for ili9481"
+    errors=$((errors + 1))
+fi
+
+# ── 3. Check fbdev device ───────────────────────────────────────────
+FB_DEV=""
+for fb in /sys/class/graphics/fb*; do
+    [ -d "$fb" ] || continue
+    fb_name=$(cat "$fb/name" 2>/dev/null || true)
+    if echo "$fb_name" | grep -qi "ili9481\|dbi"; then
+        FB_DEV="/dev/$(basename "$fb")"
+        break
+    fi
+done
+
+if [ -n "$FB_DEV" ]; then
+    pass "Framebuffer device: $FB_DEV ($fb_name)"
+else
+    info "No ili9481 framebuffer found (fbdev emulation may not be active)"
+fi
+
+# ── 4. Check dmesg for driver messages ──────────────────────────────
+if dmesg 2>/dev/null | grep -qi "ili9481"; then
+    pass "Driver messages present in kernel log"
+    dmesg | grep -i "ili9481" | tail -5 | while IFS= read -r line; do
+        echo "     $line"
+    done
+else
+    info "No ili9481 messages in dmesg (ring buffer may have rotated)"
+fi
+
+# ── 5. Optional: paint test pattern via fbdev ────────────────────────
+if [ -n "$FB_DEV" ] && [ -w "$FB_DEV" ]; then
+    echo ""
+    info "Painting colour bar test pattern to $FB_DEV ..."
+
+    # 480×320 @ RGB565 = 307200 bytes
+    W=480; H=320; BPP=2
+    STRIPE=$((H / 4))
+    {
+        # Red stripe   (RGB565 = 0xF800 → little-endian: 00 F8)
+        printf '%0.s\x00\xF8' $(seq 1 $((W * STRIPE)))
+        # Green stripe  (RGB565 = 0x07E0 → little-endian: E0 07)
+        printf '%0.s\xE0\x07' $(seq 1 $((W * STRIPE)))
+        # Blue stripe   (RGB565 = 0x001F → little-endian: 1F 00)
+        printf '%0.s\x1F\x00' $(seq 1 $((W * STRIPE)))
+        # White stripe  (RGB565 = 0xFFFF → little-endian: FF FF)
+        printf '%0.s\xFF\xFF' $(seq 1 $((W * STRIPE)))
+    } > "$FB_DEV"
+
+    pass "Test pattern written — you should see Red/Green/Blue/White stripes"
+else
+    info "Skipping test pattern (no writable framebuffer device)"
+fi
+
+# ── Summary ──────────────────────────────────────────────────────────
+echo ""
+if [ $errors -eq 0 ]; then
+    pass "All checks passed"
+    exit 0
+else
+    fail "$errors check(s) failed"
+    exit 1
+fi

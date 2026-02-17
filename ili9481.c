@@ -6,6 +6,18 @@
  *
  * Based on drivers/gpu/drm/tiny/ili9341.c and hx8357d.c
  * Init sequence sourced from TFT_eSPI ILI9481_INIT_1
+ *
+ * This is an out-of-tree DRM/KMS replacement for the removed fbtft
+ * driver.  It uses the MIPI DBI helper and the DRM simple display
+ * pipe abstraction to present a /dev/dri/card* device that works
+ * with standard KMS clients (Wayland compositors, Plymouth, etc.)
+ * as well as the legacy fbdev emulation layer (/dev/fb*).
+ *
+ * Requirements:
+ *   - Kernel >= 6.2 (drm_gem_dma_helper.h, DRM_MIPI_DBI_SIMPLE_DISPLAY_PIPE_FUNCS)
+ *   - SPI controller with GPIO chip-select
+ *   - DC (data/command) GPIO
+ *   - Optional: RESET GPIO, backlight device
  */
 
 #include <linux/backlight.h>
@@ -23,6 +35,7 @@
 #include <drm/drm_gem_dma_helper.h>
 #include <drm/drm_mipi_dbi.h>
 #include <drm/drm_modeset_helper.h>
+#include <drm/drm_print.h>
 
 /* ILI9481-specific register definitions */
 #define ILI9481_PWRSET    0xD0   /* Power Setting */
@@ -44,9 +57,13 @@ static void ili9481_enable(struct drm_simple_display_pipe *pipe,
 	if (!drm_dev_enter(pipe->crtc.dev, &idx))
 		return;
 
+	drm_dbg_driver(pipe->crtc.dev, "Initialising ILI9481 display\n");
+
 	ret = mipi_dbi_poweron_conditional_reset(dbidev);
-	if (ret < 0)
+	if (ret < 0) {
+		drm_err(pipe->crtc.dev, "Failed to reset display: %d\n", ret);
 		goto out_exit;
+	}
 	if (ret == 1)
 		goto out_enable;
 
@@ -112,6 +129,9 @@ out_enable:
 		break;
 	}
 	mipi_dbi_command(dbi, MIPI_DCS_SET_ADDRESS_MODE, addr_mode);
+	drm_dbg_driver(pipe->crtc.dev,
+		       "Rotation %u°, MADCTL=0x%02x\n",
+		       dbidev->rotation, addr_mode);
 
 	mipi_dbi_enable_flush(dbidev, crtc_state, plane_state);
 
@@ -195,6 +215,9 @@ static int ili9481_probe(struct spi_device *spi)
 
 	drm_fbdev_generic_setup(drm, 0);
 
+	dev_info(dev, "ILI9481 display registered (%ux%u, rotation %u°)\n",
+		 ili9481_mode.hdisplay, ili9481_mode.vdisplay, rotation);
+
 	return 0;
 }
 
@@ -204,6 +227,7 @@ static void ili9481_remove(struct spi_device *spi)
 
 	drm_dev_unplug(drm);
 	drm_atomic_helper_shutdown(drm);
+	dev_info(&spi->dev, "ILI9481 display removed\n");
 }
 
 static void ili9481_shutdown(struct spi_device *spi)

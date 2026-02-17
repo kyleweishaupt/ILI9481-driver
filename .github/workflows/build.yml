@@ -24,12 +24,18 @@ jobs:
     build:
         runs-on: ubuntu-latest
         strategy:
+            fail-fast: false
             matrix:
                 include:
                     - arch: arm64
                       cross_compile: aarch64-linux-gnu-
                       gcc_pkg: gcc-aarch64-linux-gnu
                       defconfig: bcm2711_defconfig
+                    # To add armhf (32-bit) support, uncomment below:
+                    # - arch: arm
+                    #   cross_compile: arm-linux-gnueabihf-
+                    #   gcc_pkg: gcc-arm-linux-gnueabihf
+                    #   defconfig: bcm2711_defconfig
 
         name: Build (${{ matrix.arch }}, ${{ matrix.defconfig }})
 

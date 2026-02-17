@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+config DRM_ILI9481
+	tristate "DRM support for Ilitek ILI9481 display panels"
+	depends on DRM && SPI
+	select DRM_KMS_HELPER
+	select DRM_GEM_DMA_HELPER
+	select DRM_MIPI_DBI
+	select BACKLIGHT_CLASS_DEVICE
+	help
+	  DRM/KMS driver for SPI-connected display panels using the
+	  Ilitek ILI9481 controller (320×480, 16-bit RGB565).
+
+	  This is an out-of-tree replacement for the removed fbtft
+	  driver.  When loaded it creates a standard DRM device
+	  (/dev/dri/card*) with fbdev emulation (/dev/fb*).
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called ili9481.
