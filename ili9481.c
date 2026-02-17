@@ -73,12 +73,9 @@ static void ili9481_enable(struct drm_simple_display_pipe *pipe,
 	if (ret == 1)
 		goto out_enable;
 
-	/* Command Access Protect — allow all commands */
-	mipi_dbi_command(dbi, 0xB0, 0x00);
-
 	/* Exit Sleep Mode */
 	mipi_dbi_command(dbi, MIPI_DCS_EXIT_SLEEP_MODE);
-	msleep(120);
+	msleep(50);
 
 	/* Power Setting: VCI1=VCI, DDVDH=VCI*2, VGH=VCI*7, VGL=-VCI*4 */
 	mipi_dbi_command(dbi, ILI9481_PWRSET, 0x07, 0x42, 0x18);
@@ -95,53 +92,42 @@ static void ili9481_enable(struct drm_simple_display_pipe *pipe,
 	/* Frame Rate & Inversion Control */
 	mipi_dbi_command(dbi, ILI9481_FRMCTL, 0x03);
 
+	/* Interface Pixel Format: RGB565 for both DBI and DPI */
+	mipi_dbi_command(dbi, MIPI_DCS_SET_PIXEL_FORMAT, 0x55);
+
 	/* Gamma Setting */
 	mipi_dbi_command(dbi, ILI9481_GAMSET,
 			 0x00, 0x32, 0x36, 0x45, 0x06, 0x16,
 			 0x37, 0x75, 0x77, 0x54, 0x0C, 0x00);
 
-	/* Interface Pixel Format: RGB565 for both DBI and DPI */
-	mipi_dbi_command(dbi, MIPI_DCS_SET_PIXEL_FORMAT, 0x55);
-
-	/* Enter Inversion Mode (required for correct colors on SPI) */
-	mipi_dbi_command(dbi, MIPI_DCS_ENTER_INVERT_MODE);
-
-	/*
-	 * Set the full native address window.
-	 * mipi_dbi_enable_flush() will re-set these based on the
-	 * actual framebuffer dimensions, but setting them here
-	 * ensures the controller is in a known state.
-	 */
-
-	/* Column Address Set: 0x0000 - 0x013F (0 - 319, native width) */
-	mipi_dbi_command(dbi, MIPI_DCS_SET_COLUMN_ADDRESS,
-			 0x00, 0x00, 0x01, 0x3F);
-
-	/* Page Address Set: 0x0000 - 0x01DF (0 - 479, native height) */
-	mipi_dbi_command(dbi, MIPI_DCS_SET_PAGE_ADDRESS,
-			 0x00, 0x00, 0x01, 0xDF);
-
-	msleep(120);
-
 	/* Display ON */
 	mipi_dbi_command(dbi, MIPI_DCS_SET_DISPLAY_ON);
-	msleep(25);
 
 out_enable:
-	/* Set rotation via MADCTL */
+	/*
+	 * Set rotation via MADCTL.
+	 *
+	 * ILI9481 MADCTL bit layout (differs from ILI9341!):
+	 *   Bit 5: MV  (Row/Column Exchange)  = 0x20
+	 *   Bit 3: BGR (RGB-BGR Order)        = 0x08
+	 *   Bit 1: VF  (Vertical Flip)        = 0x02
+	 *   Bit 0: HF  (Horizontal Flip)      = 0x01
+	 *
+	 * Values match the proven fbtft fb_ili9481.c driver.
+	 */
 	switch (dbidev->rotation) {
 	default:
 	case 0:
-		addr_mode = 0x48; /* MX | BGR */
+		addr_mode = 0x09; /* HF | BGR */
 		break;
 	case 90:
 		addr_mode = 0x28; /* MV | BGR */
 		break;
 	case 180:
-		addr_mode = 0x88; /* MY | BGR */
+		addr_mode = 0x0A; /* VF | BGR */
 		break;
 	case 270:
-		addr_mode = 0xE8; /* MY | MX | MV | BGR */
+		addr_mode = 0x2B; /* MV | HF | VF | BGR */
 		break;
 	}
 	mipi_dbi_command(dbi, MIPI_DCS_SET_ADDRESS_MODE, addr_mode);

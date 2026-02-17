@@ -207,11 +207,12 @@ echo "[$STEP/$TOTAL] Configuring framebuffer console ..."
 if [ -f "$CMDLINE" ]; then
     # Remove any old fbcon=map: setting first
     sed -i 's/ fbcon=map:[0-9]*//g' "$CMDLINE"
-    # Map all virtual consoles to fb1 (ILI9481, since HDMI is usually fb0)
-    sed -i 's/$/ fbcon=map:1/' "$CMDLINE"
-    echo "  Set fbcon=map:1 in $CMDLINE"
+    # Map console to the ILI9481 framebuffer.
+    # The ili9481 DRM driver claims fb0, so map console to fb0.
+    sed -i 's/$/ fbcon=map:0/' "$CMDLINE"
+    echo "  Set fbcon=map:0 in $CMDLINE"
 else
-    echo "  Warning: $CMDLINE not found — add 'fbcon=map:1' manually."
+    echo "  Warning: $CMDLINE not found — add 'fbcon=map:0' manually."
 fi
 STEP=$((STEP + 1))
 
@@ -250,20 +251,29 @@ echo "  Created $XORG_CONF"
 HELPER="/usr/local/bin/ili9481-find-card"
 cat > "$HELPER" <<'HEOF'
 #!/bin/bash
-# Find the /dev/dri/cardN belonging to the ili9481 driver
-for card in /sys/class/drm/card*/device/driver/module; do
-    mod=$(basename "$(readlink -f "$card")" 2>/dev/null)
-    if [ "$mod" = "ili9481" ]; then
-        CARD="/dev/dri/$(basename "$(dirname "$(dirname "$(dirname "$card")")")")"
-        # Update the X11 config with the correct card path
-        if [ -f /etc/X11/xorg.conf.d/99-ili9481.conf ]; then
-            sed -i "s|\"kmsdev\".*|\"kmsdev\" \"$CARD\"|" /etc/X11/xorg.conf.d/99-ili9481.conf
+# Find the /dev/dri/cardN belonging to the ili9481 driver.
+# Wait up to 30 seconds for the module to load (it loads via DT overlay
+# and DKMS, which can take 10-15s on a Pi 3).
+TIMEOUT=30
+ELAPSED=0
+while [ $ELAPSED -lt $TIMEOUT ]; do
+    for card in /sys/class/drm/card*/device/driver/module; do
+        [ -e "$card" ] || continue
+        mod=$(basename "$(readlink -f "$card")" 2>/dev/null)
+        if [ "$mod" = "ili9481" ]; then
+            CARD="/dev/dri/$(basename "$(dirname "$(dirname "$(dirname "$card")")")")"
+            # Update the X11 config with the correct card path
+            if [ -f /etc/X11/xorg.conf.d/99-ili9481.conf ]; then
+                sed -i "s|\"kmsdev\".*|\"kmsdev\" \"$CARD\"|" /etc/X11/xorg.conf.d/99-ili9481.conf
+            fi
+            echo "$CARD"
+            exit 0
         fi
-        echo "$CARD"
-        exit 0
-    fi
+    done
+    sleep 1
+    ELAPSED=$((ELAPSED + 1))
 done
-echo "ili9481 DRM card not found" >&2
+echo "ili9481 DRM card not found after ${TIMEOUT}s" >&2
 exit 1
 HEOF
 chmod +x "$HELPER"
@@ -274,7 +284,7 @@ SYSTEMD_SVC="/etc/systemd/system/ili9481-display.service"
 cat > "$SYSTEMD_SVC" <<SEOF
 [Unit]
 Description=Configure ILI9481 SPI display as primary
-DefaultDependencies=no
+After=basic.target
 Before=display-manager.service lightdm.service gdm.service
 
 [Service]

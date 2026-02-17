@@ -172,10 +172,10 @@ translates this to the ILI9481 MADCTL register:
 
 | Rotation | MADCTL | Effective Resolution  |
 | -------- | ------ | --------------------- |
-| 0°       | 0x48   | 320 × 480 (portrait)  |
+| 0°       | 0x09   | 320 × 480 (portrait)  |
 | 90°      | 0x28   | 480 × 320 (landscape) |
-| 180°     | 0x88   | 320 × 480 (portrait)  |
-| 270°     | 0xE8   | 480 × 320 (landscape) |
+| 180°     | 0x0A   | 320 × 480 (portrait)  |
+| 270°     | 0x2B   | 480 × 320 (landscape) |
 
 ## Testing & Validation
 
