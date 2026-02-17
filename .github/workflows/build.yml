@@ -2,124 +2,127 @@
 name: Build ILI9481 Kernel Module
 
 on:
-    push:
-        branches: [main]
-    pull_request:
-        branches: [main]
-    workflow_dispatch:
-        inputs:
-            kernel_branch:
-                description: "Raspberry Pi kernel branch"
-                required: true
-                default: "rpi-6.6.y"
-                type: choice
-                options:
-                    - rpi-6.6.y
-                    - rpi-6.12.y
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      kernel_branch:
+        description: "Raspberry Pi kernel branch"
+        required: true
+        default: "rpi-6.6.y"
+        type: choice
+        options:
+          - rpi-6.6.y
+          - rpi-6.12.y
 
 env:
-    KERNEL_BRANCH: ${{ github.event.inputs.kernel_branch || 'rpi-6.6.y' }}
+  KERNEL_BRANCH: ${{ github.event.inputs.kernel_branch || 'rpi-6.6.y' }}
 
 jobs:
-    build:
-        runs-on: ubuntu-latest
-        strategy:
-            fail-fast: false
-            matrix:
-                include:
-                    - arch: arm64
-                      cross_compile: aarch64-linux-gnu-
-                      gcc_pkg: gcc-aarch64-linux-gnu
-                      defconfig: bcm2711_defconfig
-                    # To add armhf (32-bit) support, uncomment below:
-                    # - arch: arm
-                    #   cross_compile: arm-linux-gnueabihf-
-                    #   gcc_pkg: gcc-arm-linux-gnueabihf
-                    #   defconfig: bcm2711_defconfig
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            cross_compile: aarch64-linux-gnu-
+            gcc_pkg: gcc-aarch64-linux-gnu
+            defconfig: bcm2711_defconfig
+          # To add armhf (32-bit) support, uncomment below:
+          # - arch: arm
+          #   cross_compile: arm-linux-gnueabihf-
+          #   gcc_pkg: gcc-arm-linux-gnueabihf
+          #   defconfig: bcm2711_defconfig
 
-        name: Build (${{ matrix.arch }}, ${{ matrix.defconfig }})
+    name: Build (${{ matrix.arch }}, ${{ matrix.defconfig }})
 
-        steps:
-            - name: Checkout driver source
-              uses: actions/checkout@v4
+    steps:
+      - name: Checkout driver source
+        uses: actions/checkout@v4
 
-            - name: Install toolchain & dependencies
-              run: |
-                  sudo apt-get update -qq
-                  sudo apt-get install -y -qq \
-                    ${{ matrix.gcc_pkg }} \
-                    device-tree-compiler \
-                    bc bison flex libssl-dev
+      - name: Install toolchain & dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            ${{ matrix.gcc_pkg }} \
+            device-tree-compiler \
+            bc bison flex libssl-dev
 
-            - name: Cache kernel source
-              id: cache-kernel
-              uses: actions/cache@v4
-              with:
-                  path: ~/kernel-source
-                  key: kernel-${{ env.KERNEL_BRANCH }}-${{ matrix.arch }}-${{ matrix.defconfig }}
+      - name: Cache kernel source
+        id: cache-kernel
+        uses: actions/cache@v4
+        with:
+          path: ~/kernel-source
+          key: kernel-${{ env.KERNEL_BRANCH }}-${{ matrix.arch }}-${{ matrix.defconfig }}
 
-            - name: Clone Raspberry Pi kernel (cache miss)
-              if: steps.cache-kernel.outputs.cache-hit != 'true'
-              run: |
-                  git clone --depth=1 --branch "$KERNEL_BRANCH" \
-                    https://github.com/raspberrypi/linux.git ~/kernel-source
+      - name: Clone Raspberry Pi kernel (cache miss)
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth=1 --branch "$KERNEL_BRANCH" \
+            https://github.com/raspberrypi/linux.git ~/kernel-source
 
-            - name: Prepare kernel headers (cache miss)
-              if: steps.cache-kernel.outputs.cache-hit != 'true'
-              run: |
-                  cd ~/kernel-source
-                  make ARCH=${{ matrix.arch }} CROSS_COMPILE=${{ matrix.cross_compile }} \
-                    ${{ matrix.defconfig }}
-                  make ARCH=${{ matrix.arch }} CROSS_COMPILE=${{ matrix.cross_compile }} \
-                    modules_prepare
-                  # Create empty Module.symvers so modpost doesn't fail.
-                  # Symbol resolution happens at module load time on the
-                  # target device, not at build time during cross-compilation.
-                  touch Module.symvers
+      - name: Prepare kernel headers (cache miss)
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
+        run: |
+          cd ~/kernel-source
+          make ARCH=${{ matrix.arch }} CROSS_COMPILE=${{ matrix.cross_compile }} \
+            ${{ matrix.defconfig }}
+          make ARCH=${{ matrix.arch }} CROSS_COMPILE=${{ matrix.cross_compile }} \
+            modules_prepare
+          # Create empty Module.symvers for out-of-tree build.
+          # Symbol resolution happens at module load time on the
+          # target device, not at build time during cross-compilation.
+          # KBUILD_MODPOST_WARN=1 is passed at build time so modpost
+          # treats the unresolved symbols as warnings, not errors.
+          touch Module.symvers
 
-            - name: Build kernel module
-              run: |
-                  make -C ~/kernel-source \
-                    ARCH=${{ matrix.arch }} \
-                    CROSS_COMPILE=${{ matrix.cross_compile }} \
-                    M=$GITHUB_WORKSPACE \
-                    modules
+      - name: Build kernel module
+        run: |
+          make -C ~/kernel-source \
+            ARCH=${{ matrix.arch }} \
+            CROSS_COMPILE=${{ matrix.cross_compile }} \
+            M=$GITHUB_WORKSPACE \
+            KBUILD_MODPOST_WARN=1 \
+            modules
 
-            - name: Compile device tree overlay
-              run: |
-                  dtc -@ -Hepapr -I dts -O dtb \
-                    -o ili9481.dtbo ili9481-overlay.dts
+      - name: Compile device tree overlay
+        run: |
+          dtc -@ -Hepapr -I dts -O dtb \
+            -o ili9481.dtbo ili9481-overlay.dts
 
-            - name: Stage install package
-              run: |
-                  mkdir -p package
-                  cp ili9481.ko package/
-                  cp ili9481.dtbo package/
-                  cp install.sh package/
-                  chmod +x package/install.sh
-                  # Record build metadata
-                  echo "arch=${{ matrix.arch }}" > package/BUILD_INFO
-                  echo "kernel_branch=${{ env.KERNEL_BRANCH }}" >> package/BUILD_INFO
-                  echo "defconfig=${{ matrix.defconfig }}" >> package/BUILD_INFO
-                  echo "built=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> package/BUILD_INFO
-                  KVER=$(make -s -C ~/kernel-source kernelrelease 2>/dev/null || echo "unknown")
-                  echo "kernel_version=$KVER" >> package/BUILD_INFO
+      - name: Stage install package
+        run: |
+          mkdir -p package
+          cp ili9481.ko package/
+          cp ili9481.dtbo package/
+          cp install.sh package/
+          chmod +x package/install.sh
+          # Record build metadata
+          echo "arch=${{ matrix.arch }}" > package/BUILD_INFO
+          echo "kernel_branch=${{ env.KERNEL_BRANCH }}" >> package/BUILD_INFO
+          echo "defconfig=${{ matrix.defconfig }}" >> package/BUILD_INFO
+          echo "built=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> package/BUILD_INFO
+          KVER=$(make -s -C ~/kernel-source kernelrelease 2>/dev/null || echo "unknown")
+          echo "kernel_version=$KVER" >> package/BUILD_INFO
 
-            - name: Verify artifacts
-              run: |
-                  echo "=== Kernel module ==="
-                  file package/ili9481.ko
-                  modinfo package/ili9481.ko
-                  echo ""
-                  echo "=== Device tree overlay ==="
-                  file package/ili9481.dtbo
-                  echo ""
-                  echo "=== Build info ==="
-                  cat package/BUILD_INFO
+      - name: Verify artifacts
+        run: |
+          echo "=== Kernel module ==="
+          file package/ili9481.ko
+          modinfo package/ili9481.ko
+          echo ""
+          echo "=== Device tree overlay ==="
+          file package/ili9481.dtbo
+          echo ""
+          echo "=== Build info ==="
+          cat package/BUILD_INFO
 
-            - name: Upload artifacts
-              uses: actions/upload-artifact@v4
-              with:
-                  name: ili9481-${{ matrix.arch }}-${{ env.KERNEL_BRANCH }}
-                  path: package/
-                  retention-days: 30
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ili9481-${{ matrix.arch }}-${{ env.KERNEL_BRANCH }}
+          path: package/
+          retention-days: 30
