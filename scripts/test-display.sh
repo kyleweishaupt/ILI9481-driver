@@ -299,13 +299,28 @@ if systemctl is-enabled inland-tft35-flush.service >/dev/null 2>&1; then
     else
         fail "inland-tft35-flush.service is NOT running!"
         info "Without the flush daemon, fbtft may never send data to the LCD."
-        info "Check: sudo journalctl -u inland-tft35-flush.service"
+        # Show the last few journal lines for diagnosis
+        FLUSH_LOG=$(journalctl -u inland-tft35-flush.service -n 5 --no-pager 2>/dev/null || true)
+        if [ -n "$FLUSH_LOG" ]; then
+            echo "     Recent flush service log:"
+            echo "$FLUSH_LOG" | while IFS= read -r line; do echo "     $line"; done
+        fi
         info "Fix:   sudo systemctl restart inland-tft35-flush.service"
     fi
 else
     fail "inland-tft35-flush.service is not enabled"
     info "The defio flush daemon is CRITICAL for the display to work."
     info "Re-run: sudo ./install.sh"
+fi
+
+# Check Python3 (needed for flush daemon's preferred method)
+if command -v python3 >/dev/null 2>&1; then
+    pass "Python3 is available (flush daemon will use mmap method)"
+else
+    fail "Python3 is NOT installed (flush daemon may use slow fallback)"
+    info "The flush daemon needs Python3 for reliable mmap-based SPI triggers."
+    info "Install: sudo apt-get install -y python3"
+    info "Then:    sudo systemctl restart inland-tft35-flush.service"
 fi
 
 # ═════════════════════════════════════════════════════════════════════
@@ -390,9 +405,21 @@ if [ "$PAINT_PATTERN" -eq 1 ] && [ -n "$FB_DEV" ] && [ -w "$FB_DEV" ]; then
                 $(cat "$FB_SYS/bits_per_pixel" 2>/dev/null) / 8 )) 2>/dev/null || FB_SIZE=307200
     NPIXELS=$((FB_SIZE / 2))
 
+    # --- Pre-test: Force display reinit via blank/unblank cycle ---
+    info "Reinitialising display (blank/unblank cycle)..."
+    FB_NUM_HW=$(basename "$FB_DEV" | sed 's/fb//')
+    echo 1 > "/sys/class/graphics/fb${FB_NUM_HW}/blank" 2>/dev/null || true
+    sleep 0.5
+    echo 0 > "/sys/class/graphics/fb${FB_NUM_HW}/blank" 2>/dev/null || true
+    sleep 1
+    echo "     (Display should have blinked or turned off briefly)"
+    echo ""
+
     # --- Test A: write() syscall (triggers fb_sys_write → defio) ---
     info "Test A: Writing random static via write() to ${FB_DEV}..."
     dd if=/dev/urandom of="$FB_DEV" bs=1024 count=$((FB_SIZE / 1024)) 2>/dev/null
+    # Also force deferred I/O by reading and rewriting the framebuffer
+    dd if="$FB_DEV" of="$FB_DEV" bs=4096 count=$((FB_SIZE / 4096)) conv=notrunc 2>/dev/null || true
     sleep 2
     echo "     >>> Did the screen show colourful static/noise? <<<"
     echo ""
@@ -408,7 +435,11 @@ m[:len(blue)] = blue
 m.close()
 os.close(fd)
 print('     mmap write complete')
-" 2>/dev/null || info "Python mmap write failed (python3 may not be available)"
+" 2>/dev/null || {
+        # Perl fallback for mmap-like write
+        perl -e "print '\x1f\x00' x $NPIXELS" > "$FB_DEV" 2>/dev/null || \
+            info "Skipped (python3 and perl not available)"
+    }
     sleep 2
     echo "     >>> Did the screen turn solid BLUE? <<<"
     echo ""
@@ -420,7 +451,9 @@ import os
 fb = os.open('$FB_DEV', os.O_WRONLY)
 os.write(fb, b'\x00\xf8' * $NPIXELS)
 os.close(fb)
-" 2>/dev/null || printf '%0.s\x00\xF8' $(seq 1 "$NPIXELS") > "$FB_DEV" 2>/dev/null
+" 2>/dev/null || \
+        perl -e "print '\x00\xf8' x $NPIXELS" > "$FB_DEV" 2>/dev/null || \
+        dd if=/dev/urandom of="$FB_DEV" bs=1024 count=$((FB_SIZE / 1024)) 2>/dev/null
     sleep 2
     echo "     >>> Did the screen turn solid RED? <<<"
     echo ""
@@ -432,7 +465,9 @@ import os
 fb = os.open('$FB_DEV', os.O_WRONLY)
 os.write(fb, b'\xe0\x07' * $NPIXELS)
 os.close(fb)
-" 2>/dev/null || printf '%0.s\xE0\x07' $(seq 1 "$NPIXELS") > "$FB_DEV" 2>/dev/null
+" 2>/dev/null || \
+        perl -e "print '\xe0\x07' x $NPIXELS" > "$FB_DEV" 2>/dev/null || \
+        dd if=/dev/zero of="$FB_DEV" bs=1024 count=$((FB_SIZE / 1024)) 2>/dev/null
     sleep 2
     echo "     >>> Did the screen turn solid GREEN? <<<"
     echo ""
@@ -445,9 +480,12 @@ os.close(fb)
     echo ""
     echo "  If the screen stayed WHITE the entire time:"
     echo "    → fbtft is NOT sending SPI data to the LCD."
-    echo "    → Check: sudo journalctl -u inland-tft35-flush.service"
-    echo "    → Check: dmesg | grep -iE 'spi.*err|dma.*err|fbtft'"
-    echo "    → The SPI bus or LCD hardware may have a fault."
+    echo "    → Most likely cause: flush daemon not running."
+    echo "    → Fix: sudo apt-get install -y python3"
+    echo "    →      sudo systemctl restart inland-tft35-flush.service"
+    echo "    → Also: sudo journalctl -u inland-tft35-flush.service"
+    echo "    → Also: dmesg | grep -iE 'spi.*err|dma.*err|fbtft'"
+    echo "    → If all else fails, re-run: sudo ./install.sh && sudo reboot"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 elif [ "$PAINT_PATTERN" -eq 1 ]; then
@@ -474,6 +512,7 @@ else
     echo ""
     echo "Common fixes:"
     echo "  White screen?  → sudo ./install.sh && sudo reboot"
+    echo "  No python3?    → sudo apt-get install -y python3"
     echo "  Flush daemon?  → sudo systemctl restart inland-tft35-flush.service"
     echo "  Blacklisted?   → sudo rm /etc/modprobe.d/*fbtft* && sudo update-initramfs -u && sudo reboot"
     echo "  Wayland?       → sudo raspi-config → Advanced → Wayland → X11"

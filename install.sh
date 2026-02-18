@@ -132,6 +132,7 @@ systemctl daemon-reload 2>/dev/null || true
 rm -f /usr/local/bin/ili9481-find-card 2>/dev/null || true
 rm -f /usr/local/bin/inland-tft35-setup 2>/dev/null || true
 rm -f /usr/local/bin/inland-tft35-flush 2>/dev/null || true
+rm -f /usr/local/bin/inland-tft35-flush-bin 2>/dev/null || true
 
 # Remove old X11/Wayland configs
 rm -f /etc/X11/xorg.conf.d/99-ili9481.conf 2>/dev/null || true
@@ -494,6 +495,24 @@ if [ -f "$XORG_CONF" ]; then
     echo "inland-tft35: updated X11 fbdev → ${FB_DEV}" >&2
 fi
 
+# ── DISPLAY REINIT: blank/unblank cycle ─────────────────────────────
+# On some displays, the power-on init doesn't stick.  Toggling the
+# framebuffer blank state forces fbtft to re-send Sleep Out + Display
+# On commands, which can fix a white screen after cold boot.
+echo "inland-tft35: toggling display blank/unblank to reinit LCD ..." >&2
+echo 1 > "/sys/class/graphics/fb${FB_NUM}/blank" 2>/dev/null || true
+sleep 0.5
+echo 0 > "/sys/class/graphics/fb${FB_NUM}/blank" 2>/dev/null || true
+sleep 0.5
+
+# Also force a full framebuffer write to trigger deferred I/O
+FB_SYS="/sys/class/graphics/fb${FB_NUM}"
+FB_BYTES=$(( $(cut -d, -f1 < "$FB_SYS/virtual_size") \
+           * $(cut -d, -f2 < "$FB_SYS/virtual_size") \
+           * $(cat "$FB_SYS/bits_per_pixel") / 8 )) 2>/dev/null || FB_BYTES=307200
+dd if="${FB_DEV}" of="${FB_DEV}" bs=4096 count=$((FB_BYTES / 4096)) conv=notrunc 2>/dev/null || true
+echo "inland-tft35: display reinit complete" >&2
+
 echo "$FB_DEV"
 HEOF
 chmod +x "$HELPER"
@@ -535,54 +554,127 @@ echo "  Enabled ${SERVICE_NAME}.service"
 
 FLUSH_HELPER="/usr/local/bin/inland-tft35-flush"
 cat > "$FLUSH_HELPER" << 'FEOF'
-#!/usr/bin/env python3
-"""Force fbtft deferred I/O updates by touching framebuffer pages via mmap.
+#!/bin/bash
+# inland-tft35-flush — Force fbtft deferred I/O updates.
+#
+# On kernel 6.x, fbcon/X11 writes to screen_base don't trigger fbtft's
+# deferred I/O page-fault mechanism.  This daemon periodically touches
+# every framebuffer page via mmap, forcing SPI transfers.
+#
+# Tries three methods in order: Python3 mmap → compiled C → dd loop.
+set -euo pipefail
+trap 'exit 0' TERM INT
 
-Works around a kernel 6.x issue where fbcon and X11 writes to the
-framebuffer don't always trigger fbtft's SPI transfers.
-"""
+# ── Find the fbtft framebuffer ───────────────────────────────────────
+FB_DEV=""
+for fb in /sys/class/graphics/fb*; do
+    [ -d "$fb" ] || continue
+    if grep -qi 'ili9486' "$fb/name" 2>/dev/null; then
+        FB_DEV="/dev/$(basename "$fb")"
+        break
+    fi
+done
+if [ -z "$FB_DEV" ]; then
+    echo "inland-tft35-flush: no fbtft framebuffer found" >&2
+    exit 1
+fi
+
+FB_SYS="/sys/class/graphics/$(basename "$FB_DEV")"
+FB_SIZE=$(( $(cut -d, -f1 < "$FB_SYS/virtual_size") \
+          * $(cut -d, -f2 < "$FB_SYS/virtual_size") \
+          * $(cat "$FB_SYS/bits_per_pixel") / 8 )) 2>/dev/null || FB_SIZE=307200
+echo "inland-tft35-flush: $FB_DEV ($FB_SIZE bytes)" >&2
+
+# ── Method 1: Python3 mmap (preferred — triggers real page faults) ───
+if command -v python3 >/dev/null 2>&1; then
+    echo "inland-tft35-flush: using python3 mmap" >&2
+    exec python3 - "$FB_DEV" << 'PYEOF'
 import mmap, os, time, signal, sys
+signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
+signal.signal(signal.SIGINT, lambda *a: sys.exit(0))
+fd = os.open(sys.argv[1], os.O_RDWR)
+m = mmap.mmap(fd, 0)
+ps = os.sysconf('SC_PAGESIZE')
+sz = m.size()
+print(f'inland-tft35-flush: mmap active ({sz} bytes, {sz//ps} pages)',
+      file=sys.stderr, flush=True)
+while True:
+    for off in range(0, sz, ps):
+        m[off] = m[off]
+    time.sleep(0.05)
+PYEOF
+fi
 
-def find_fbtft_fb():
-    for name in sorted(os.listdir('/sys/class/graphics/')):
-        if not name.startswith('fb'):
-            continue
-        try:
-            with open(f'/sys/class/graphics/{name}/name') as f:
-                if 'ili9486' in f.read().lower():
-                    return f'/dev/{name}'
-        except (IOError, PermissionError):
-            continue
-    return None
+# ── Method 2: Compiled C helper (no Python needed) ──────────────────
+CBIN="/usr/local/bin/inland-tft35-flush-bin"
+if [ -x "$CBIN" ]; then
+    echo "inland-tft35-flush: using compiled C helper" >&2
+    exec "$CBIN" "$FB_DEV"
+fi
 
-def main():
-    signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
-    signal.signal(signal.SIGINT, lambda *a: sys.exit(0))
-
-    fb_path = find_fbtft_fb()
-    if not fb_path:
-        print('inland-tft35-flush: no fbtft framebuffer found', file=sys.stderr)
-        sys.exit(1)
-
-    fd = os.open(fb_path, os.O_RDWR)
-    m = mmap.mmap(fd, 0)
-    page_size = os.sysconf('SC_PAGESIZE')
-    fb_size = m.size()
-
-    print(f'inland-tft35-flush: active on {fb_path} '
-          f'({fb_size} bytes, {fb_size // page_size} pages)',
-          file=sys.stderr)
-
-    while True:
-        for offset in range(0, fb_size, page_size):
-            m[offset] = m[offset]  # read-write triggers page fault → defio
-        time.sleep(0.05)  # ~20 fps
-
-if __name__ == '__main__':
-    main()
+# ── Method 3: dd write loop (last resort, no dependencies) ──────────
+echo "inland-tft35-flush: falling back to dd loop" >&2
+echo "inland-tft35-flush: WARNING: for better performance, install python3:" >&2
+echo "inland-tft35-flush:   sudo apt-get install -y python3" >&2
+BLOCKS=$((FB_SIZE / 4096))
+[ "$BLOCKS" -lt 1 ] && BLOCKS=75
+while true; do
+    dd if="$FB_DEV" of="$FB_DEV" bs=4096 count="$BLOCKS" conv=notrunc 2>/dev/null || true
+    sleep 0.05
+done
 FEOF
 chmod +x "$FLUSH_HELPER"
 echo "  Created ${FLUSH_HELPER}"
+
+# Compile C flush helper (works without Python3)
+FLUSH_C_SRC="/tmp/inland-tft35-flush-bin.c"
+cat > "$FLUSH_C_SRC" << 'CSRC'
+#include <sys/mman.h>
+#include <sys/ioctl.h>
+#include <linux/fb.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <signal.h>
+#include <stdlib.h>
+static volatile int running = 1;
+static void handler(int s) { (void)s; running = 0; }
+int main(int argc, char **argv) {
+    if (argc < 2) { fprintf(stderr, "Usage: %s /dev/fbN\n", argv[0]); return 1; }
+    signal(SIGTERM, handler);
+    signal(SIGINT, handler);
+    int fd = open(argv[1], O_RDWR);
+    if (fd < 0) { perror("open"); return 1; }
+    struct fb_fix_screeninfo fi;
+    unsigned long sz = 307200;
+    if (ioctl(fd, FBIOGET_FSCREENINFO, &fi) == 0 && fi.smem_len > 0)
+        sz = fi.smem_len;
+    unsigned char *p = mmap(NULL, sz, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+    if (p == MAP_FAILED) { perror("mmap"); close(fd); return 1; }
+    long ps = sysconf(_SC_PAGESIZE);
+    fprintf(stderr, "inland-tft35-flush: mmap active on %s (%lu bytes, %ld pages)\n",
+            argv[1], sz, (long)(sz / ps));
+    while (running) {
+        unsigned long o;
+        for (o = 0; o < sz; o += ps) p[o] = p[o];
+        usleep(50000);
+    }
+    munmap(p, sz);
+    close(fd);
+    return 0;
+}
+CSRC
+CBIN="/usr/local/bin/inland-tft35-flush-bin"
+if command -v gcc >/dev/null 2>&1; then
+    if gcc -O2 -o "$CBIN" "$FLUSH_C_SRC" 2>/dev/null; then
+        echo "  Compiled C flush helper → ${CBIN}"
+    else
+        echo "  Note: C compilation failed (Python3 or dd will be used)"
+    fi
+else
+    echo "  Note: gcc not found (Python3 or dd fallback will be used)"
+fi
+rm -f "$FLUSH_C_SRC"
 
 FLUSH_SVC="/etc/systemd/system/inland-tft35-flush.service"
 cat > "$FLUSH_SVC" <<FLEOF
@@ -590,16 +682,18 @@ cat > "$FLUSH_SVC" <<FLEOF
 Description=Force fbtft SPI display updates (defio flush)
 After=inland-tft35-display.service
 Requires=inland-tft35-display.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 ExecStart=${FLUSH_HELPER}
 Restart=always
-RestartSec=3
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 FLEOF
+systemctl daemon-reload
 systemctl enable inland-tft35-flush.service 2>/dev/null || true
 echo "  Enabled inland-tft35-flush.service (defio flush daemon)"
 STEP=$((STEP + 1))
@@ -612,8 +706,15 @@ echo "[$STEP/$TOTAL] Installing display packages & configuring X11 ..."
 
 if command -v apt-get >/dev/null 2>&1; then
     apt-get update -qq 2>/dev/null || true
-    apt-get install -y -qq xserver-xorg-video-fbdev 2>/dev/null || \
-        echo "  Warning: could not install xserver-xorg-video-fbdev"
+    apt-get install -y -qq python3 xserver-xorg-video-fbdev 2>/dev/null || \
+        echo "  Warning: could not install some packages (python3, fbdev)"
+    # Verify python3 is available (critical for flush daemon)
+    if command -v python3 >/dev/null 2>&1; then
+        echo "  python3: $(python3 --version 2>&1)"
+    else
+        echo "  WARNING: python3 not installed — flush daemon will use fallback"
+        echo "  Install manually: sudo apt-get install -y python3"
+    fi
 fi
 
 XORG_CONF_DIR="/etc/X11/xorg.conf.d"

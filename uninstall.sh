@@ -55,7 +55,7 @@ for svc in inland-tft35-flush inland-tft35-display ili9481-display; do
 done
 systemctl daemon-reload 2>/dev/null || true
 
-for helper in /usr/local/bin/inland-tft35-setup /usr/local/bin/inland-tft35-flush /usr/local/bin/ili9481-find-card; do
+for helper in /usr/local/bin/inland-tft35-setup /usr/local/bin/inland-tft35-flush /usr/local/bin/inland-tft35-flush-bin /usr/local/bin/ili9481-find-card; do
     [ -f "$helper" ] && rm -f "$helper" && echo "  Removed $helper"
 done
 STEP=$((STEP + 1))
