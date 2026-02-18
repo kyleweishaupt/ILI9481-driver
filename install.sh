@@ -333,11 +333,18 @@ STEP=$((STEP + 1))
 
 echo "[$STEP/$TOTAL] Configuring ${CMDLINE} ..."
 if [ -f "$CMDLINE" ]; then
-    # Remove stale fbcon mapping
+    # Remove stale fbcon mapping and splash
     sed -i 's/ fbcon=map:[^ ]*//g' "$CMDLINE"
-    # Remove 'splash' — Plymouth only renders on HDMI/DSI, not SPI
     sed -i 's/ splash//g' "$CMDLINE"
-    echo "  Cleaned cmdline.txt (removed stale fbcon/splash)"
+
+    # Add fbcon=map:10 — maps console 0 → fb1 (fbtft), console 1 → fb0.
+    # The fbtft overlay always creates fb1 because the firmware simple-fb
+    # or vc4 stub claims fb0 first.  Without this, fbcon renders to fb0
+    # (invisible HDMI) and the SPI screen stays white.
+    if ! grep -q 'fbcon=map:' "$CMDLINE"; then
+        sed -i '1s/$/ fbcon=map:10/' "$CMDLINE"
+    fi
+    echo "  Configured cmdline.txt (fbcon=map:10, removed splash)"
 else
     echo "  Warning: ${CMDLINE} not found."
 fi
@@ -430,16 +437,27 @@ fi
 
 echo "inland-tft35: found framebuffer ${FB_DEV} (fb_name=${fb_name})" >&2
 
-# Rebind fbcon to the fbtft framebuffer
-for vtcon in /sys/class/vtconsole/vtcon*; do
-    [ -d "$vtcon" ] || continue
-    vtname=$(cat "$vtcon/name" 2>/dev/null || true)
-    if echo "$vtname" | grep -qi "frame buffer"; then
-        echo 0 > "$vtcon/bind" 2>/dev/null || true
-        echo 1 > "$vtcon/bind" 2>/dev/null || true
-        echo "inland-tft35: rebound fbcon to fb${FB_NUM}" >&2
-    fi
-done
+# Map all virtual consoles to the fbtft framebuffer.
+# con2fbmap explicitly assigns each console to a specific fb device,
+# unlike unbind/rebind which just picks the last-registered fb.
+if command -v con2fbmap >/dev/null 2>&1; then
+    for vc in $(seq 1 7); do
+        con2fbmap "$vc" "$FB_NUM" 2>/dev/null || true
+    done
+    echo "inland-tft35: mapped consoles 1-7 to fb${FB_NUM} via con2fbmap" >&2
+else
+    # Fallback: unbind/rebind fbcon (less reliable — picks last-registered fb)
+    for vtcon in /sys/class/vtconsole/vtcon*; do
+        [ -d "$vtcon" ] || continue
+        vtname=$(cat "$vtcon/name" 2>/dev/null || true)
+        if echo "$vtname" | grep -qi "frame buffer"; then
+            echo 0 > "$vtcon/bind" 2>/dev/null || true
+            sleep 0.5
+            echo 1 > "$vtcon/bind" 2>/dev/null || true
+            echo "inland-tft35: rebound fbcon (fb${FB_NUM})" >&2
+        fi
+    done
+fi
 
 # Update X11 fbdev config with the correct device path
 XORG_CONF="/etc/X11/xorg.conf.d/99-spi-display.conf"
@@ -459,8 +477,8 @@ cat > "$SYSTEMD_SVC" <<SEOF
 [Unit]
 Description=Configure Inland TFT35 SPI display at boot
 DefaultDependencies=no
-After=sysinit.target
-Before=display-manager.service lightdm.service gdm.service
+After=systemd-modules-load.service local-fs.target
+Before=display-manager.service lightdm.service gdm.service getty@tty1.service
 
 [Service]
 Type=oneshot
@@ -499,7 +517,7 @@ cat > "$XORG_CONF" <<'XEOF'
 Section "Device"
     Identifier  "InlandTFT35"
     Driver      "fbdev"
-    Option      "fbdev"  "/dev/fb0"
+    Option      "fbdev"  "/dev/fb1"
 EndSection
 
 Section "Screen"
@@ -580,14 +598,15 @@ echo "What was configured:"
 echo "  • vc4-kms-v3d commented out (fbtft needs legacy framebuffer)"
 echo "  • display_auto_detect disabled (prevents overlay conflicts)"
 echo "  • Overlay: dtoverlay=${OVERLAY},speed=${SPI_SPEED},rotate=${ROTATE},fps=${FPS}"
+echo "  • Console routed to SPI display: fbcon=map:10 in cmdline.txt"
 if [ "$BLACKLIST_CLEANED" -eq 1 ]; then
     echo "  • fbtft blacklists REMOVED + initramfs rebuilt"
 fi
 if [ "$SWITCHED_TO_X11" -eq 1 ]; then
     echo "  • Display backend switched from Wayland to X11"
 fi
-echo "  • systemd service: ${SERVICE_NAME}.service"
-echo "  • X11 config: /etc/X11/xorg.conf.d/99-spi-display.conf"
+echo "  • systemd service: ${SERVICE_NAME}.service (remaps fbcon+X11 at boot)"
+echo "  • X11 config: /etc/X11/xorg.conf.d/99-spi-display.conf → /dev/fb1"
 if [ "$TOUCH" -eq 1 ]; then
     echo "  • Touch config: /etc/X11/xorg.conf.d/99-touch-calibration.conf"
 fi

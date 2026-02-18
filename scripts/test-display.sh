@@ -63,8 +63,8 @@ if [ "$BLACKLISTED" -eq 0 ]; then
     pass "No fbtft blacklists found in /etc/modprobe.d/"
 fi
 
-# Check initramfs for cached blacklists
-if [ -f /boot/firmware/initramfs* ] || [ -f /boot/initrd* ]; then
+# Check initramfs for cached blacklists (use ls to avoid glob expansion in [ ])
+if ls /boot/firmware/initramfs* /boot/initrd* >/dev/null 2>&1; then
     if lsinitramfs /boot/firmware/initramfs* 2>/dev/null | grep -q modprobe; then
         info "initramfs exists — if blacklists were recently removed, run:"
         info "  sudo update-initramfs -u"
@@ -229,15 +229,29 @@ if [ -n "$FB_DEV" ]; then
     FB_NUM=$(basename "$FB_DEV" | sed 's/fb//')
     FBCON_MAP=$(cat /proc/cmdline 2>/dev/null | grep -o 'fbcon=map:[^ ]*' || true)
     if [ -n "$FBCON_MAP" ]; then
-        MAP_NUM=$(echo "$FBCON_MAP" | sed 's/fbcon=map://')
-        if [ "$MAP_NUM" != "$FB_NUM" ]; then
-            fail "fbcon mapped to fb${MAP_NUM} but fbtft is fb${FB_NUM}"
-            info "Check: systemctl status inland-tft35-display.service"
+        # fbcon=map:10 means console 0→fb1, console 1→fb0
+        MAP_FIRST=$(echo "$FBCON_MAP" | sed 's/fbcon=map:\(.\).*/\1/')
+        if [ "$MAP_FIRST" = "$FB_NUM" ]; then
+            pass "fbcon cmdline maps console 0 to fb${FB_NUM} (correct)"
         else
-            pass "fbcon correctly mapped to fb${FB_NUM}"
+            fail "fbcon cmdline maps console 0 to fb${MAP_FIRST} but fbtft is fb${FB_NUM}"
+            info "Fix: edit ${CMDLINE:-/boot/firmware/cmdline.txt} → fbcon=map:${FB_NUM}0"
         fi
     else
-        info "No fbcon=map: in cmdline (fbcon uses first available fb)"
+        fail "No fbcon=map: in cmdline (console defaults to fb0, display likely white!)"
+        info "Fix: re-run sudo ./install.sh (it now adds fbcon=map:10)"
+    fi
+
+    # Also check runtime mapping via con2fbmap
+    if command -v con2fbmap >/dev/null 2>&1; then
+        CON1_FB=$(con2fbmap 1 2>/dev/null | grep -o '[0-9]*$' || true)
+        if [ -n "$CON1_FB" ]; then
+            if [ "$CON1_FB" = "$FB_NUM" ]; then
+                pass "Console 1 runtime-mapped to fb${FB_NUM} via con2fbmap"
+            else
+                fail "Console 1 runtime-mapped to fb${CON1_FB} (expected fb${FB_NUM})"
+            fi
+        fi
     fi
 
     for vtcon in /sys/class/vtconsole/vtcon*; do
