@@ -3,8 +3,8 @@
 #
 # test-display.sh — Validate the Inland TFT35 ILI9481 userspace driver installation
 #
-# Checks daemon binary, vfb module, framebuffer device, systemd service,
-# configuration, and optionally writes a random test pattern.
+# Checks daemon binary, source framebuffer, systemd service, configuration,
+# GPIO access, and optionally writes a test pattern to the source fb.
 #
 # Usage: sudo ./scripts/test-display.sh [--pattern]
 
@@ -39,7 +39,7 @@ pass() { echo -e "${GRN}[PASS]${RST} $*"; PASSES=$((PASSES + 1)); }
 fail() { echo -e "${RED}[FAIL]${RST} $*"; FAILS=$((FAILS + 1)); }
 info() { echo -e "${YEL}[INFO]${RST} $*"; }
 
-echo "=== Inland TFT35 ILI9481 Validation (Userspace Driver) ==="
+echo "=== Inland TFT35 ILI9481 Validation (Userspace Daemon) ==="
 echo
 
 # =====================================================================
@@ -55,54 +55,41 @@ fi
 echo
 
 # =====================================================================
-# [2] vfb kernel module
+# [2] Source framebuffer (HDMI / vc4drmfb)
 # =====================================================================
 
-echo "[2] Virtual framebuffer module"
-if lsmod | awk '{print $1}' | grep -qx "vfb"; then
-    pass "vfb module is loaded"
-else
-    fail "vfb module is not loaded (try: sudo modprobe vfb)"
-fi
-echo
-
-# =====================================================================
-# [3] Framebuffer device
-# =====================================================================
-
-echo "[3] Framebuffer device"
+echo "[2] Source framebuffer"
 FB_DEV=""
-for fb in /sys/class/graphics/fb*; do
-    [ -d "$fb" ] || continue
-    fb_name=$(cat "$fb/name" 2>/dev/null || true)
-    if echo "$fb_name" | grep -qi 'Virtual FB\|vfb'; then
-        FB_DEV="/dev/$(basename "$fb")"
-        pass "Found virtual framebuffer: $FB_DEV ($fb_name)"
-        break
-    fi
-done
-if [ -z "$FB_DEV" ]; then
-    # Fall back to /dev/fb1 if it exists
-    if [ -e /dev/fb1 ]; then
-        FB_DEV="/dev/fb1"
-        pass "Found framebuffer device: $FB_DEV"
-    else
-        fail "No virtual framebuffer found"
-    fi
+if [ -e /dev/fb0 ]; then
+    FB_DEV="/dev/fb0"
+    fb_name=$(cat /sys/class/graphics/fb0/name 2>/dev/null || echo "unknown")
+    pass "Found source framebuffer: $FB_DEV ($fb_name)"
+else
+    fail "No framebuffer found at /dev/fb0"
 fi
 
 if [ -n "$FB_DEV" ] && command -v fbset >/dev/null 2>&1; then
     fb_info=$(fbset -fb "$FB_DEV" 2>/dev/null || true)
-    if echo "$fb_info" | grep -q '480x320\|320x480'; then
-        pass "Framebuffer resolution matches ILI9481 (480x320 or 320x480)"
-    else
-        info "Framebuffer info: $(echo "$fb_info" | head -2 | tr '\n' ' ')"
+    if [ -n "$fb_info" ]; then
+        info "fbset: $(echo "$fb_info" | head -3 | tr '\n' ' ')"
     fi
-    if echo "$fb_info" | grep -q '16'; then
-        pass "Framebuffer depth is 16bpp"
+fi
+echo
+
+# =====================================================================
+# [3] /dev/gpiomem access
+# =====================================================================
+
+echo "[3] GPIO access"
+if [ -c /dev/gpiomem ]; then
+    pass "/dev/gpiomem exists"
+    if [ -r /dev/gpiomem ] && [ -w /dev/gpiomem ]; then
+        pass "/dev/gpiomem is readable/writable"
     else
-        info "Could not confirm 16bpp depth"
+        fail "/dev/gpiomem is not readable/writable (check permissions / gpio group)"
     fi
+else
+    fail "/dev/gpiomem not found — GPIO MMIO will not work"
 fi
 echo
 
@@ -134,11 +121,6 @@ if [ -f /etc/ili9481/ili9481.conf ]; then
 else
     fail "Config file missing at /etc/ili9481/ili9481.conf"
 fi
-if [ -f /etc/modprobe.d/vfb-ili9481.conf ]; then
-    pass "vfb modprobe config exists"
-else
-    fail "vfb modprobe config missing at /etc/modprobe.d/vfb-ili9481.conf"
-fi
 echo
 
 # =====================================================================
@@ -151,15 +133,10 @@ if command -v raspi-config >/dev/null 2>&1; then
     if [ "$state" = "1" ]; then
         pass "Desktop backend is X11"
     elif [ "$state" = "0" ]; then
-        fail "Desktop backend is Wayland (fbdev display output may fail)"
+        fail "Desktop backend is Wayland (fbdev mirroring may not work)"
     else
         info "Could not determine desktop backend"
     fi
-fi
-if [ -f /etc/X11/xorg.conf.d/99-inland-fbdev.conf ]; then
-    pass "X11 fbdev config file exists"
-else
-    fail "X11 fbdev config file missing"
 fi
 echo
 
@@ -172,11 +149,12 @@ if [ "$PAINT_PATTERN" -eq 1 ]; then
     if [ -n "$FB_DEV" ]; then
         if dd if=/dev/urandom of="$FB_DEV" bs=307200 count=1 status=none 2>/dev/null; then
             pass "Random test frame written to $FB_DEV"
+            info "If the daemon is running, random noise should appear on the TFT"
         else
             fail "Could not write test frame to $FB_DEV"
         fi
     else
-        fail "Cannot write pattern because framebuffer was not found"
+        fail "Cannot write pattern — no framebuffer found"
     fi
     echo
 fi

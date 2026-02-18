@@ -22,7 +22,8 @@ void ili9481_init(struct gpio_bus *bus, uint32_t rotate);
  * ili9481_flush_full() — Write a complete frame of `width * height` pixels
  *                        to the display, setting CASET/PASET/RAMWR first.
  *
- * `pixels` points to width*height uint16_t values in RGB565 format.
+ * `pixels` points to width*height uint16_t values in RGB444 format
+ * (bits [11:8]=R, [7:4]=G, [3:0]=B, bits [15:12] ignored).
  */
 void ili9481_flush_full(struct gpio_bus *bus,
                         uint16_t width, uint16_t height,

@@ -5,10 +5,12 @@ Before=display-manager.service
 
 [Service]
 Type=simple
-ExecStartPre=/sbin/modprobe vfb
 ExecStart=/usr/local/bin/ili9481-fb --config=/etc/ili9481/ili9481.conf
+ExecStopPost=-/bin/sh -c 'command -v con2fbmap >/dev/null && for vt in 1 2 3 4 5 6; do con2fbmap $vt 0 2>/dev/null; done || true'
 Restart=on-failure
 RestartSec=5
+StartLimitBurst=3
+StartLimitIntervalSec=30
 StandardOutput=journal
 StandardError=journal
 

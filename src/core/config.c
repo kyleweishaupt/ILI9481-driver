@@ -20,7 +20,7 @@ void config_defaults(struct ili9481_config *cfg)
     memset(cfg, 0, sizeof(*cfg));
     cfg->rotation     = 270;
     cfg->fps          = 30;
-    strncpy(cfg->fb_device, "/dev/fb1", sizeof(cfg->fb_device) - 1);
+    strncpy(cfg->fb_device, "/dev/fb0", sizeof(cfg->fb_device) - 1);
     cfg->enable_touch = 0;
     strncpy(cfg->spi_device, "/dev/spidev0.1", sizeof(cfg->spi_device) - 1);
     cfg->spi_speed    = 2000000;
@@ -137,7 +137,7 @@ int config_parse_args(struct ili9481_config *cfg, int argc, char **argv)
                    "  --config=PATH    Config file path\n"
                    "  --rotate=DEG     Rotation: 0, 90, 180, 270 (default: 270)\n"
                    "  --fps=N          Target FPS (default: 30)\n"
-                   "  --fb=DEVICE      Framebuffer device (default: /dev/fb1)\n"
+                   "  --fb=DEVICE      Source framebuffer to mirror (default: /dev/fb0)\n"
                    "  --touch          Enable touch support\n"
                    "  --no-touch       Disable touch support (default)\n"
                    "  --benchmark      Run FPS benchmark and exit\n"

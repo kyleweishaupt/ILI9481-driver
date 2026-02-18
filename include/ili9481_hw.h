@@ -3,8 +3,10 @@
  * ili9481_hw.h — ILI9481 register definitions, MADCTL values, and GPIO pin
  *                constants for the userspace framebuffer daemon.
  *
- * Ported from driver/ili9481-gpio.h (kernel module).
- * Uses <stdint.h> types instead of <linux/types.h>.
+ * Pin mapping for 26-pin Inland / Kuman / MCUfriend 3.5" TFT shields.
+ * These boards only wire DB0–DB11 (12 data bits).  DB12–DB15 are NOT
+ * connected because physical pins 27–40 are absent on the 26-pin header.
+ * The ILI9481 is therefore operated in 12-bit RGB444 mode (COLMOD = 0x03).
  */
 
 #ifndef ILI9481_HW_H
@@ -44,7 +46,8 @@
 /* Pixel format                                                       */
 /* ------------------------------------------------------------------ */
 
-#define ILI9481_COLMOD_16BIT    0x55    /* 16-bit/pixel RGB565 */
+#define ILI9481_COLMOD_12BIT    0x03    /* 12-bit/pixel RGB444 */
+#define ILI9481_COLMOD_16BIT    0x55    /* 16-bit/pixel RGB565 (unused) */
 
 /* ------------------------------------------------------------------ */
 /* MADCTL rotation values                                             */
@@ -70,43 +73,47 @@
 #define ILI9481_HEIGHT          480
 
 /* ------------------------------------------------------------------ */
-/* GPIO pin mapping (BCM numbering)                                   */
+/* GPIO pin mapping (BCM numbering) — 26-pin header                   */
 /*                                                                    */
-/* Source: driver/dts/inland-ili9481.dts (authoritative)              */
+/* Inland / Kuman / MCUfriend / Banggood 3.5" TFT shields piggyback  */
+/* on pins 1–26 of the Pi 40-pin header (the original 26-pin layout). */
+/* DB12–DB15 would require pins 27+, which are absent.                */
 /* ------------------------------------------------------------------ */
 
 /* Control pins */
-#define GPIO_RST        27
-#define GPIO_DC         22
-#define GPIO_WR         17
+#define GPIO_RST        25      /* Pin 22 — active-low hardware reset */
+#define GPIO_CS          8      /* Pin 24 — active-low chip select    */
+#define GPIO_DC         24      /* Pin 18 — register select (RS/DC)   */
+#define GPIO_WR         23      /* Pin 16 — active-low write strobe   */
+#define GPIO_RD         18      /* Pin 12 — active-low read (unused, held HIGH) */
 
-/* 16-bit data bus: DB0–DB15 */
-#define GPIO_DB0         7
-#define GPIO_DB1         8
-#define GPIO_DB2        25
-#define GPIO_DB3        24
-#define GPIO_DB4        23
-#define GPIO_DB5        18
-#define GPIO_DB6        15
-#define GPIO_DB7        14
-#define GPIO_DB8        12
-#define GPIO_DB9        16
-#define GPIO_DB10       20
-#define GPIO_DB11       21
-#define GPIO_DB12        5
-#define GPIO_DB13        6
-#define GPIO_DB14       13
-#define GPIO_DB15       19
+/* 12-bit data bus: DB0–DB11 */
+/* Lower byte (DB0–DB7) */
+#define GPIO_DB0         9      /* Pin 21 */
+#define GPIO_DB1        11      /* Pin 23 */
+#define GPIO_DB2        10      /* Pin 19 */
+#define GPIO_DB3        22      /* Pin 15 */
+#define GPIO_DB4        27      /* Pin 13 */
+#define GPIO_DB5        17      /* Pin 11 */
+#define GPIO_DB6         4      /* Pin  7 */
+#define GPIO_DB7         3      /* Pin  5 */
+
+/* Upper nibble (DB8–DB11) */
+#define GPIO_DB8        14      /* Pin  8 */
+#define GPIO_DB9        15      /* Pin 10 */
+#define GPIO_DB10        2      /* Pin  3 */
+#define GPIO_DB11        7      /* Pin 26 */
 
 /* Number of data bus pins */
-#define DATA_BUS_WIDTH  16
+#define DATA_BUS_WIDTH  12
 
-/* All data bus pins as an array initialiser */
-#define DATA_BUS_PINS \
-    { GPIO_DB0,  GPIO_DB1,  GPIO_DB2,  GPIO_DB3,  \
-      GPIO_DB4,  GPIO_DB5,  GPIO_DB6,  GPIO_DB7,  \
-      GPIO_DB8,  GPIO_DB9,  GPIO_DB10, GPIO_DB11, \
-      GPIO_DB12, GPIO_DB13, GPIO_DB14, GPIO_DB15 }
+/* Data bus pin arrays */
+#define DATA_BUS_LO_PINS \
+    { GPIO_DB0, GPIO_DB1, GPIO_DB2, GPIO_DB3, \
+      GPIO_DB4, GPIO_DB5, GPIO_DB6, GPIO_DB7 }
+
+#define DATA_BUS_HI_PINS \
+    { GPIO_DB8, GPIO_DB9, GPIO_DB10, GPIO_DB11 }
 
 /* ------------------------------------------------------------------ */
 /* BCM2835 GPIO register offsets (word index into the mmap'd region)  */

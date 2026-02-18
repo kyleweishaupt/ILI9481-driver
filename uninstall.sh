@@ -62,7 +62,7 @@ rm -f /usr/local/bin/ili9481-fb
 
 echo "[3/7] Removing configuration files"
 rm -rf /etc/ili9481
-rm -f /etc/modprobe.d/vfb-ili9481.conf
+rm -f /etc/modprobe.d/vfb-ili9481.conf    # legacy vfb installs
 
 # =====================================================================
 # [4/7] Remove X11 display and touch config
@@ -77,7 +77,7 @@ rm -f /etc/X11/xorg.conf.d/99-inland-touch.conf
 # =====================================================================
 
 echo "[5/7] Removing module autoload hints"
-rm -f /etc/modules-load.d/inland-tft35.conf
+rm -f /etc/modules-load.d/inland-tft35.conf    # legacy vfb/kernel-module installs
 
 # =====================================================================
 # [6/7] Clean config.txt and cmdline.txt entries

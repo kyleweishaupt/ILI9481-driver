@@ -1,9 +1,16 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * gpio_mmio.c — MMIO GPIO bus driver for ILI9481 16-bit parallel interface
+ * gpio_mmio.c — MMIO GPIO bus driver for ILI9481 12-bit parallel interface
  *
  * Writes directly to BCM283x GPIO registers via /dev/gpiomem.
- * Uses precomputed 256-entry lookup tables for fast pixel writes.
+ * Uses precomputed lookup tables for fast pixel writes.
+ *
+ * Data bus: DB0–DB11 (12 lines).  DB12–DB15 are NOT connected on
+ * 26-pin Inland / Kuman / MCUfriend shields.  Pixels are written
+ * as 12-bit RGB444 values: DB[11:8]=R, DB[7:4]=G, DB[3:0]=B.
+ *
+ * Control pins: RST, CS, DC, WR, RD (5 pins).
+ * Total GPIO usage: 17 pins (12 data + 5 control).
  *
  * Pi 5 (RP1 chip) is NOT supported — detected and rejected at open time.
  */
@@ -32,24 +39,19 @@ struct gpio_bus {
     uint32_t           wr_mask;     /* 1 << GPIO_WR                     */
     uint32_t           dc_mask;     /* 1 << GPIO_DC                     */
     uint32_t           rst_mask;    /* 1 << GPIO_RST                    */
+    uint32_t           cs_mask;     /* 1 << GPIO_CS                     */
+    uint32_t           rd_mask;     /* 1 << GPIO_RD                     */
 
-    /* Lookup tables: map each byte value to SET/CLR masks */
-    uint32_t lut_lo_set[256];       /* DB0–DB7: bits to set             */
-    uint32_t lut_lo_clr[256];       /* DB0–DB7: bits to clear           */
-    uint32_t lut_hi_set[256];       /* DB8–DB15: bits to set            */
-    uint32_t lut_hi_clr[256];       /* DB8–DB15: bits to clear          */
+    /* Lookup tables for fast data bus writes */
+    uint32_t lut_lo_set[256];       /* DB0–DB7:  byte → bits to SET     */
+    uint32_t lut_lo_clr[256];       /* DB0–DB7:  byte → bits to CLR     */
+    uint32_t lut_hi_set[16];        /* DB8–DB11: nibble → bits to SET   */
+    uint32_t lut_hi_clr[16];        /* DB8–DB11: nibble → bits to CLR   */
 };
 
-/* All data bus pins, low byte and high byte groups */
-static const int db_lo_pins[8] = {
-    GPIO_DB0, GPIO_DB1, GPIO_DB2, GPIO_DB3,
-    GPIO_DB4, GPIO_DB5, GPIO_DB6, GPIO_DB7
-};
-
-static const int db_hi_pins[8] = {
-    GPIO_DB8, GPIO_DB9, GPIO_DB10, GPIO_DB11,
-    GPIO_DB12, GPIO_DB13, GPIO_DB14, GPIO_DB15
-};
+/* Pin arrays */
+static const int db_lo_pins[8] = DATA_BUS_LO_PINS;
+static const int db_hi_pins[4] = DATA_BUS_HI_PINS;
 
 /* ------------------------------------------------------------------ */
 /* Pi model detection                                                 */
@@ -82,11 +84,9 @@ static int detect_pi_model(void)
         /* Also check "Revision" field — Pi 5 revisions start with 'c0' in new-style */
         if (strncmp(line, "Revision", 8) == 0) {
             found_revision = 1;
-            /* New-style revision: if bits [23:12] hardware type = 0x17, it's Pi 5 */
             char *colon = strchr(line, ':');
             if (colon) {
                 unsigned long rev = strtoul(colon + 1, NULL, 16);
-                /* New-style flag is bit 23 */
                 if (rev & (1 << 23)) {
                     unsigned int type = (rev >> 4) & 0xFF;
                     if (type == 0x17) {
@@ -138,47 +138,56 @@ static void gpio_set_output(volatile uint32_t *regs, int pin)
 
 static void gpio_build_luts(struct gpio_bus *bus)
 {
+    /* Low byte LUT: DB0–DB7 (256 entries, one per byte value) */
     for (int val = 0; val < 256; val++) {
-        uint32_t lo_set = 0, lo_clr = 0;
-        uint32_t hi_set = 0, hi_clr = 0;
-
+        uint32_t set = 0, clr = 0;
         for (int bit = 0; bit < 8; bit++) {
-            if (val & (1 << bit)) {
-                lo_set |= (1u << db_lo_pins[bit]);
-                hi_set |= (1u << db_hi_pins[bit]);
-            } else {
-                lo_clr |= (1u << db_lo_pins[bit]);
-                hi_clr |= (1u << db_hi_pins[bit]);
-            }
+            if (val & (1 << bit))
+                set |= (1u << db_lo_pins[bit]);
+            else
+                clr |= (1u << db_lo_pins[bit]);
         }
+        bus->lut_lo_set[val] = set;
+        bus->lut_lo_clr[val] = clr;
+    }
 
-        bus->lut_lo_set[val] = lo_set;
-        bus->lut_lo_clr[val] = lo_clr;
-        bus->lut_hi_set[val] = hi_set;
-        bus->lut_hi_clr[val] = hi_clr;
+    /* High nibble LUT: DB8–DB11 (16 entries, one per nibble value) */
+    for (int val = 0; val < 16; val++) {
+        uint32_t set = 0, clr = 0;
+        for (int bit = 0; bit < 4; bit++) {
+            if (val & (1 << bit))
+                set |= (1u << db_hi_pins[bit]);
+            else
+                clr |= (1u << db_hi_pins[bit]);
+        }
+        bus->lut_hi_set[val] = set;
+        bus->lut_hi_clr[val] = clr;
     }
 }
 
 /* ------------------------------------------------------------------ */
-/* Core 16-bit bus write (hot path)                                   */
+/* Core 12-bit bus write (hot path)                                   */
 /* ------------------------------------------------------------------ */
 
 /*
- * Write a single 16-bit value onto the data bus and pulse /WR.
+ * Write a 12-bit value onto the data bus (DB0–DB11) and pulse /WR.
+ *
+ *   val bits [7:0]   → DB0–DB7   (low byte, via 256-entry LUT)
+ *   val bits [11:8]  → DB8–DB11  (high nibble, via 16-entry LUT)
  *
  * 8080-style timing:
  *   1. Place data on bus (SET/CLR in one shot via LUTs)
- *   2. Assert /WR low  (active-low: GPCLR the WR pin)
- *   3. Hold ≥ 15 ns
- *   4. Release /WR high (GPSET the WR pin — rising edge latches)
+ *   2. Assert /WR low  (active-low: CLR the WR pin)
+ *   3. DMB barrier (≥ 15 ns)
+ *   4. Release /WR high (SET the WR pin — rising edge latches data)
  */
 static inline void __attribute__((optimize("O3")))
-bus_write16(struct gpio_bus *bus, uint16_t val)
+bus_write12(struct gpio_bus *bus, uint16_t val)
 {
     uint8_t lo = val & 0xFF;
-    uint8_t hi = (val >> 8) & 0xFF;
+    uint8_t hi = (val >> 8) & 0x0F;
 
-    /* Set data bus: combine lo-byte and hi-byte masks */
+    /* Set data bus: combine low-byte and high-nibble masks */
     bus->regs[GPSET0] = bus->lut_lo_set[lo] | bus->lut_hi_set[hi];
     bus->regs[GPCLR0] = bus->lut_lo_clr[lo] | bus->lut_hi_clr[hi];
 
@@ -224,23 +233,35 @@ struct gpio_bus *gpio_bus_open(void)
     bus->wr_mask  = 1u << GPIO_WR;
     bus->dc_mask  = 1u << GPIO_DC;
     bus->rst_mask = 1u << GPIO_RST;
+    bus->cs_mask  = 1u << GPIO_CS;
+    bus->rd_mask  = 1u << GPIO_RD;
 
-    /* Set all control and data pins to output */
+    /* Set all control pins to output */
     gpio_set_output(bus->regs, GPIO_RST);
+    gpio_set_output(bus->regs, GPIO_CS);
     gpio_set_output(bus->regs, GPIO_DC);
     gpio_set_output(bus->regs, GPIO_WR);
+    gpio_set_output(bus->regs, GPIO_RD);
 
-    static const int all_data_pins[DATA_BUS_WIDTH] = DATA_BUS_PINS;
-    for (int i = 0; i < DATA_BUS_WIDTH; i++)
-        gpio_set_output(bus->regs, all_data_pins[i]);
+    /* Set all data pins to output */
+    for (int i = 0; i < 8; i++)
+        gpio_set_output(bus->regs, db_lo_pins[i]);
+    for (int i = 0; i < 4; i++)
+        gpio_set_output(bus->regs, db_hi_pins[i]);
 
-    /* Start with WR high (idle), DC high (data mode) */
-    bus->regs[GPSET0] = bus->wr_mask | bus->dc_mask;
+    /* Idle state:
+     *   WR  = HIGH (deasserted, active-low)
+     *   DC  = HIGH (data mode)
+     *   RD  = HIGH (deasserted, active-low — we never read)
+     *   CS  = LOW  (asserted, active-low — always selected)
+     */
+    bus->regs[GPSET0] = bus->wr_mask | bus->dc_mask | bus->rd_mask;
+    bus->regs[GPCLR0] = bus->cs_mask;
 
     /* Build LUTs */
     gpio_build_luts(bus);
 
-    log_info("GPIO MMIO bus opened successfully (19 pins configured)");
+    log_info("GPIO MMIO bus opened (12-bit data + 5 control = 17 pins configured)");
     return bus;
 }
 
@@ -248,6 +269,10 @@ void gpio_bus_close(struct gpio_bus *bus)
 {
     if (!bus)
         return;
+
+    /* Deassert CS (drive HIGH to deselect) */
+    if (bus->regs && bus->regs != MAP_FAILED)
+        bus->regs[GPSET0] = bus->cs_mask;
 
     if (bus->regs && bus->regs != MAP_FAILED)
         munmap((void *)bus->regs, 4096);
@@ -278,7 +303,7 @@ void gpio_write_cmd(struct gpio_bus *bus, uint8_t cmd)
     bus->regs[GPCLR0] = bus->dc_mask;
     dmb();
 
-    bus_write16(bus, (uint16_t)cmd);
+    bus_write12(bus, (uint16_t)cmd);
 
     /* DC high = data mode */
     bus->regs[GPSET0] = bus->dc_mask;
@@ -288,7 +313,7 @@ void gpio_write_cmd(struct gpio_bus *bus, uint8_t cmd)
 void gpio_write_data(struct gpio_bus *bus, uint8_t data)
 {
     /* DC stays high (data mode) */
-    bus_write16(bus, (uint16_t)data);
+    bus_write12(bus, (uint16_t)data);
 }
 
 void __attribute__((optimize("O3")))
@@ -296,5 +321,5 @@ gpio_write_pixels(struct gpio_bus *bus, const uint16_t *pixels, uint32_t count)
 {
     /* DC stays high (data mode) — stream pixels as fast as possible */
     for (uint32_t i = 0; i < count; i++)
-        bus_write16(bus, pixels[i]);
+        bus_write12(bus, pixels[i]);
 }

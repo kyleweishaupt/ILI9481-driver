@@ -3,9 +3,9 @@
 #
 # install.sh — Inland TFT35 ILI9481 (userspace framebuffer daemon) installer
 #
-# Builds and installs the ili9481-fb userspace daemon that drives the display
-# via MMIO GPIO writes, mirroring a kernel vfb virtual framebuffer to the
-# ILI9481 panel.  No kernel headers, DKMS, or custom kernel modules required.
+# Builds and installs the ili9481-fb userspace daemon that mirrors the HDMI
+# framebuffer (fb0) to the ILI9481 panel via MMIO GPIO writes.
+# No kernel headers, DKMS, vfb module, or custom kernel modules required.
 #
 # Targets: Raspberry Pi OS Trixie (Debian 13, kernel 6.12+, 64-bit)
 #          Raspberry Pi 1/2/3/4/Zero/Zero 2 W (NOT Pi 5)
@@ -21,6 +21,7 @@ set -euo pipefail
 ROTATE=270
 FPS=30
 TOUCH=0
+X11_ON_TFT=0
 
 # =====================================================================
 # Argument parsing
@@ -32,12 +33,14 @@ for arg in "$@"; do
         --fps=*)       FPS="${arg#*=}" ;;
         --touch)       TOUCH=1 ;;
         --no-touch)    TOUCH=0 ;;
+        --x11-on-tft)  X11_ON_TFT=1 ;;
         --help|-h)
             echo "Usage: sudo ./install.sh [OPTIONS]"
             echo "  --rotate=DEG      Display rotation: 0, 90, 180, 270 (default: 270)"
             echo "  --fps=N           Framebuffer refresh rate (default: 30)"
             echo "  --touch           Enable XPT2046 touch (WARNING: conflicts with data bus)"
             echo "  --no-touch        Skip touch setup (default)"
+            echo "  --x11-on-tft      Redirect X11 desktop to TFT (disables HDMI desktop)"
             exit 0
             ;;
         *)
@@ -96,11 +99,6 @@ matrix_for_rotation() {
     esac
 }
 
-ensure_line() {
-    local file="$1" line="$2"
-    grep -qxF "$line" "$file" || echo "$line" >> "$file"
-}
-
 remove_lines() {
     local file="$1"; shift
     for pattern in "$@"; do
@@ -120,13 +118,14 @@ echo "Cmdline:  $CMDLINE"
 echo "Rotation: $ROTATE"
 echo "FPS:      $FPS"
 echo "Touch:    $([ "$TOUCH" -eq 1 ] && echo yes || echo no)"
+echo "X11→TFT:  $([ "$X11_ON_TFT" -eq 1 ] && echo yes || echo no)"
 echo
 
 # =====================================================================
-# [1/9] Install required packages
+# [1/8] Install required packages
 # =====================================================================
 
-echo "[1/9] Installing required packages"
+echo "[1/8] Installing required packages"
 apt-get update
 apt-get install -y \
     build-essential \
@@ -136,10 +135,10 @@ apt-get install -y \
     xinput
 
 # =====================================================================
-# [2/9] Build and install ili9481-fb userspace daemon
+# [2/8] Build and install ili9481-fb userspace daemon
 # =====================================================================
 
-echo "[2/9] Building and installing ili9481-fb daemon"
+echo "[2/8] Building and installing ili9481-fb daemon"
 
 if [ ! -f "${SCRIPT_DIR}/src/core/service_main.c" ]; then
     echo "Error: source not found at ${SCRIPT_DIR}/src/core/service_main.c"
@@ -151,10 +150,10 @@ make -C "${SCRIPT_DIR}" ENABLE_TOUCH=${TOUCH}
 make -C "${SCRIPT_DIR}" install
 
 # =====================================================================
-# [3/9] Write runtime configuration
+# [3/8] Write runtime configuration
 # =====================================================================
 
-echo "[3/9] Writing runtime configuration"
+echo "[3/8] Writing runtime configuration"
 
 mkdir -p /etc/ili9481
 
@@ -165,7 +164,9 @@ cat > /etc/ili9481/ili9481.conf <<EOF
 [display]
 rotation = ${ROTATE}
 fps = ${FPS}
-fb_device = /dev/fb1
+
+# Source framebuffer to mirror (HDMI = /dev/fb0)
+fb_device = /dev/fb0
 
 [touch]
 enable_touch = ${TOUCH}
@@ -174,33 +175,10 @@ spi_speed = 2000000
 EOF
 
 # =====================================================================
-# [4/9] Configure vfb module autoload
+# [4/8] Clean stale config from previous kernel-module / vfb installs
 # =====================================================================
 
-echo "[4/9] Configuring vfb module autoload"
-
-# Compute framebuffer size based on rotation
-case "$ROTATE" in
-    90|270)
-        FB_W=480; FB_H=320 ;;
-    *)
-        FB_W=320; FB_H=480 ;;
-esac
-
-cat > /etc/modprobe.d/vfb-ili9481.conf <<EOF
-# Virtual framebuffer for ILI9481 display
-options vfb vfb_enable=1 videomemorysize=$((FB_W * FB_H * 2))
-EOF
-
-cat > /etc/modules-load.d/inland-tft35.conf <<'EOF'
-vfb
-EOF
-
-# =====================================================================
-# [5/9] Clean stale config entries from previous kernel-module installs
-# =====================================================================
-
-echo "[5/9] Cleaning old config entries"
+echo "[4/8] Cleaning old config entries"
 
 # Remove old kernel module / DTS overlay entries
 remove_lines "$CONFIG" \
@@ -215,13 +193,12 @@ remove_lines "$CONFIG" \
     '/^dtoverlay=xpt2046,/d' \
     '/^disable_fw_kms_setup=1/d'
 
-# Remove old fbcon= mapping from cmdline (vfb doesn't need it)
+# Remove old fbcon= mapping from cmdline
 sed -i 's/ fbcon=map:[^ ]*//g'  "$CMDLINE"
 sed -i 's/  */ /g'              "$CMDLINE"
 sed -i 's/[[:space:]]*$//'      "$CMDLINE"
 
 # Restore KMS lines that old installer may have commented out
-# (vfb is fully KMS-compatible — no need to disable KMS)
 sed -i 's/^#\(dtoverlay=vc4-kms-v3d\)/\1/'     "$CONFIG"
 sed -i 's/^#\(dtoverlay=vc4-fkms-v3d\)/\1/'    "$CONFIG"
 sed -i 's/^#\(display_auto_detect=1\)/\1/'      "$CONFIG"
@@ -230,42 +207,48 @@ sed -i 's/^#\(display_auto_detect=1\)/\1/'      "$CONFIG"
 rm -f "${OVERLAYS_DIR}/inland-ili9481-overlay.dtbo"
 rm -f "${OVERLAYS_DIR}/inland-ili9481-overlay.dts"
 
-# Remove old kernel module autoload
-if [ -f /etc/modules-load.d/inland-tft35.conf ]; then
-    sed -i '/^ili9481-gpio$/d' /etc/modules-load.d/inland-tft35.conf
-    sed -i '/^ads7846$/d' /etc/modules-load.d/inland-tft35.conf
-fi
+# Remove old vfb module autoload files (from previous installs)
+rm -f /etc/modprobe.d/vfb-ili9481.conf
+rm -f /etc/modules-load.d/inland-tft35.conf
 
 # =====================================================================
-# [6/9] Install systemd service
+# [5/8] Install systemd service
 # =====================================================================
 
-echo "[6/9] Installing systemd service"
+echo "[5/8] Installing systemd service"
 
 # Stop old services if running
 systemctl disable --now ili9481-fb.service >/dev/null 2>&1 || true
 systemctl disable --now inland-tft35-boot.service >/dev/null 2>&1 || true
 
-# Install the new daemon service
+# Install the daemon service
 cp "${SCRIPT_DIR}/systemd/ili9481-fb.service" /etc/systemd/system/
 
 systemctl daemon-reload
 systemctl enable ili9481-fb.service
 
 # =====================================================================
-# [7/9] X11 framebuffer and touch configuration
+# [6/8] X11 framebuffer and touch configuration
 # =====================================================================
 
-echo "[7/9] Installing X11 framebuffer and touch configuration"
+echo "[6/8] Installing X11 framebuffer and touch configuration"
 
 mkdir -p /etc/X11/xorg.conf.d
-cat > /etc/X11/xorg.conf.d/99-inland-fbdev.conf <<'EOF'
+
+# Only redirect X11 to the TFT if explicitly requested.
+# Without --x11-on-tft, HDMI desktop keeps working and the TFT is a
+# mirror-only display driven by the daemon reading /dev/fb0.
+if [ "$X11_ON_TFT" -eq 1 ]; then
+    cat > /etc/X11/xorg.conf.d/99-inland-fbdev.conf <<'EOF'
 Section "Device"
     Identifier "InlandILI9481"
     Driver "fbdev"
     Option "fbdev" "/dev/fb0"
 EndSection
 EOF
+else
+    rm -f /etc/X11/xorg.conf.d/99-inland-fbdev.conf
+fi
 
 TOUCH_MATRIX="$(matrix_for_rotation "$ROTATE")"
 if [ "$TOUCH" -eq 1 ]; then
@@ -283,39 +266,29 @@ else
 fi
 
 # =====================================================================
-# [8/9] Boot-time framebuffer mapping service
+# [7/8] Boot-time framebuffer mapping service
 # =====================================================================
 
-echo "[8/9] Enabling boot mapping service"
+echo "[7/8] Enabling boot mapping service"
 
 cat > /usr/local/bin/inland-tft35-boot <<'BOOTSCRIPT'
 #!/bin/bash
 set -euo pipefail
 
-fb_number=""
-for fb_dir in /sys/class/graphics/fb*; do
-    [ -d "$fb_dir" ] || continue
-    name_file="${fb_dir}/name"
-    [ -f "$name_file" ] || continue
-    if grep -qi 'Virtual FB\|vfb' "$name_file"; then
-        fb_number="$(basename "$fb_dir" | sed 's/fb//')"
-        break
-    fi
-done
-
-if [ -z "$fb_number" ]; then
+# Only remap consoles/X11 if the ili9481-fb daemon is actually running.
+# This prevents HDMI from going dark if the daemon failed to start.
+if ! systemctl is-active --quiet ili9481-fb.service 2>/dev/null; then
+    echo "ili9481-fb.service is not active — skipping console remap" >&2
     exit 0
 fi
 
-if command -v con2fbmap >/dev/null 2>&1; then
-    for vt in 1 2 3 4 5 6; do
-        con2fbmap "$vt" "$fb_number" >/dev/null 2>&1 || true
-    done
-fi
-
+# Only remap consoles if X11-on-TFT mode was requested
 if [ -f /etc/X11/xorg.conf.d/99-inland-fbdev.conf ]; then
-    sed -i "s#Option \"fbdev\" \"/dev/fb[0-9]*\"#Option \"fbdev\" \"/dev/fb${fb_number}\"#" \
-        /etc/X11/xorg.conf.d/99-inland-fbdev.conf
+    if command -v con2fbmap >/dev/null 2>&1; then
+        for vt in 1 2 3 4 5 6; do
+            con2fbmap "$vt" 0 >/dev/null 2>&1 || true
+        done
+    fi
 fi
 BOOTSCRIPT
 chmod 755 /usr/local/bin/inland-tft35-boot
@@ -323,7 +296,8 @@ chmod 755 /usr/local/bin/inland-tft35-boot
 cat > /etc/systemd/system/inland-tft35-boot.service <<'EOF'
 [Unit]
 Description=Inland TFT35 framebuffer mapper
-After=systemd-modules-load.service
+After=systemd-modules-load.service ili9481-fb.service
+Requires=ili9481-fb.service
 Before=display-manager.service
 
 [Service]
@@ -339,10 +313,10 @@ systemctl daemon-reload
 systemctl enable inland-tft35-boot.service
 
 # =====================================================================
-# [9/9] Switch to X11 if using Wayland
+# [8/8] Switch to X11 if using Wayland
 # =====================================================================
 
-echo "[9/9] Checking desktop backend"
+echo "[8/8] Checking desktop backend"
 
 if command -v raspi-config >/dev/null 2>&1; then
     WAYLAND_STATE="$(raspi-config nonint get_wayland 2>/dev/null || echo unknown)"

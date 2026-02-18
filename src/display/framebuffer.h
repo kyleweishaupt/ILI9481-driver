@@ -1,6 +1,13 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * framebuffer.h — Virtual framebuffer provider API
+ * framebuffer.h — Framebuffer source provider API
+ *
+ * Opens an existing Linux framebuffer device (e.g. /dev/fb0), mmaps it,
+ * and provides a flush loop that reads pixels, converts/scales them to
+ * the TFT resolution (480×320 RGB444), and pushes them to the display.
+ *
+ * No kernel modules are loaded — the daemon mirrors whatever fb device
+ * already exists (typically vc4drmfb on HDMI).
  */
 
 #ifndef FRAMEBUFFER_H
@@ -14,38 +21,33 @@ struct gpio_bus;
 struct fb_provider;
 
 /*
- * fb_provider_init() — Load the vfb module, open the fb device, verify
- *                      resolution and format, mmap the video memory.
+ * fb_provider_init() — Open an existing framebuffer device, query its
+ *                      resolution and pixel format, and mmap the video
+ *                      memory for reading.
  *
- * `fb_device` is the framebuffer device path (e.g. "/dev/fb1").
- * `width` and `height` are the expected dimensions.
+ * `fb_device` is the framebuffer device path (e.g. "/dev/fb0").
+ * `tft_width` and `tft_height` are the target TFT panel dimensions.
+ *
+ * The source framebuffer may be any resolution and 16 or 32 bpp;
+ * the flush loop handles format conversion and nearest-neighbor scaling.
  *
  * Returns a provider handle on success, NULL on failure.
  */
 struct fb_provider *fb_provider_init(const char *fb_device,
-                                     uint16_t width, uint16_t height);
+                                     uint16_t tft_width, uint16_t tft_height);
 
 /*
- * fb_provider_get_buffer() — Return the mmap'd framebuffer pointer.
- */
-uint16_t *fb_provider_get_buffer(struct fb_provider *fb);
-
-/*
- * fb_provider_get_size() — Return the framebuffer size in bytes.
- */
-uint32_t fb_provider_get_size(struct fb_provider *fb);
-
-/*
- * fb_flush_loop() — Run the flush-to-display loop.
+ * fb_flush_loop() — Run the mirror-to-display loop.
  *
- * Calls ili9481_flush_full() at the configured FPS using
- * clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME).
+ * Each frame: reads from the mmap'd source fb, converts pixel format
+ * (32bpp XRGB8888 → 12bpp RGB444 if needed), scales to tft_width ×
+ * tft_height via nearest-neighbor, and calls ili9481_flush_full().
  *
- * This function runs until `*running` becomes 0 (set by signal handler).
- * Logs actual FPS every 10 seconds.
+ * Uses clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME) for timing.
+ * Runs until `*running` becomes 0.  Logs actual FPS every 10 seconds.
  */
 void fb_flush_loop(struct fb_provider *fb, struct gpio_bus *bus,
-                   uint16_t width, uint16_t height,
+                   uint16_t tft_width, uint16_t tft_height,
                    int fps, volatile int *running);
 
 /*

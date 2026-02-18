@@ -1,118 +1,159 @@
-# Inland TFT35 ILI9481 — Self-Contained GPIO Parallel Driver
+# Inland TFT35 ILI9481 — Userspace GPIO Parallel Display Driver
 
-Linux framebuffer driver for the **Inland 3.5" TFT Touch Shield** (and compatible
-Kedei-style boards) that use an **ILI9481** controller on a **16-bit 8080-parallel
-GPIO bus** with 74HC245 level shifters.
+Userspace translation daemon for the **Inland 3.5" TFT Touch Shield** (and
+compatible Kuman / MCUfriend / Banggood / Sainsmart 3.5" boards) that use an
+**ILI9481** controller on a **12-bit 8080-parallel GPIO bus** through the
+original **26-pin** Raspberry Pi header.
+
+The daemon mirrors the HDMI framebuffer (`/dev/fb0`) to the TFT panel by
+reading pixels, converting them to **RGB444**, and bit-banging them out over
+GPIO using direct MMIO register writes.
 
 ---
 
 ## What This Board Actually Is
 
 Although marketed as a simple "3.5-inch TFT for Raspberry Pi", this shield is
-**not a DPI display, not SPI, and not DSI**. It is a **16-bit 8080-parallel TFT
-shield**, electrically equivalent to the older Kedei 3.5" v1–v3 shields.
+**not a DPI display, not SPI, and not DSI**. It is a **parallel MCU-style TFT
+shield** designed for the original 26-pin GPIO header.
+
+### Board family
+
+This driver supports all boards in the following family:
+
+- **MCUfriend RPi shields** (3.5" 320×480)
+- **Banggood / Kuman 3.5" TFT shields**
+- **Sainsmart / QVGA 320×480 TFT shields**
+- **Inland rebrands** of the same design
+
+These boards **all** use:
+
+- ILI9481 or ILI9486 controller (16-bit parallel capable)
+- 8080 write-only parallel bus
+- 74HC245 / 74HCT245 bus transceivers
+- XPT2046 / ADS7846 SPI resistive touch (some variants)
+- **26-pin header only** — they do NOT use pins 27–40
+
+### 26-pin = 12 data bits, not 16
+
+Because the shield only occupies **pins 1–26** of the Pi header, it can
+physically wire only **12 data lines** (DB0–DB11). Pins for DB12–DB15 would
+require the extended 40-pin header and are **not connected**.
+
+This means:
+
+- The ILI9481 must be operated in **RGB444** mode (COLMOD = 0x03), not RGB565
+- Each pixel is 12 bits: **R[3:0] G[3:0] B[3:0]**
+- Any driver assuming 16-bit RGB565 will produce a **white screen** because
+  the top 4 data bits float high
+
+> **This is exactly why Waveshare pin maps, LCD-show scripts, old FBTFT
+> overlays, and all 16-bit drivers fail on this board.**
 
 ### Board components
 
-**Display panel:**
-- 3.5" 320×480 TFT, a-Si active matrix
-- Controller: **ILI9481** (command-set compatible with ILI9486)
-- Color depth: **RGB565** (16 bits/pixel)
-- Interface: **16-bit 8080-style parallel bus**
-- Backlight: always-on 3.3 V, no PWM control
-
-**Adapter board:**
-- **U1–U4: 74HC245 / 74HCT245** bus transceivers — level-shift the Pi's 3.3 V GPIO
-  signals to the 5 V levels required by the LCD panel, and buffer/protect the Pi GPIO
-- **U5: XPT2046 / ADS7846** resistive touch controller over SPI; on the Inland
-  variant the SPI chip-select lines share pins with the parallel data bus, making
-  touch support unreliable — see [Touch support](#touch-support) below
-- **U6–U7:** discrete support components (decoupling caps, voltage filtering)
-
-**GPIO header:** the shield piggybacks directly onto the Pi 40-pin header. All
-display signals are delivered through GPIO bit-banging — no HDMI, no SPI
-framebuffer.
+| Component          | Detail                                              |
+| ------------------ | --------------------------------------------------- |
+| **Display panel**  | 3.5" 320×480 TFT, ILI9481 controller                |
+| **Color depth**    | RGB444 (12 bits/pixel) — limited by 12 wired lines  |
+| **Interface**      | 12-bit 8080-style parallel bus (DB0–DB11)           |
+| **Level shifting** | U1–U4: 74HC245 / 74HCT245 bus transceivers          |
+| **Touch**          | U5: XPT2046 / ADS7846 (shared SPI pins, unreliable) |
+| **Backlight**      | Always-on 3.3 V, no PWM control                     |
 
 ### 8080 parallel bus signals
 
-| Signal   | Function |
-|----------|----------|
-| DB0–DB15 | 16-bit pixel data bus |
-| WR       | Write strobe (active-low; ILI9481 latches data on the rising edge) |
-| RS / DC  | Register select: LOW = command, HIGH = pixel data |
-| RST      | Hardware reset (active-low) |
-| RD       | Read strobe — unused by this driver |
-| CS       | Chip select — hardwired on this board |
-
-ILI9481 timing requirements: **tWRL ≥ 15 ns, tWRH ≥ 15 ns** (WR pulse low and
-high widths). The kernel's `ndelay(15)` call in the write path satisfies this.
+| Signal   | Function                                               |
+| -------- | ------------------------------------------------------ |
+| DB0–DB11 | 12-bit pixel data bus                                  |
+| WR       | Write strobe (active-low; data latches on rising edge) |
+| RS / DC  | Register select: LOW = command, HIGH = pixel data      |
+| RST      | Hardware reset (active-low)                            |
+| CS       | Chip select (active-low)                               |
+| RD       | Read strobe — unused, held HIGH                        |
 
 ---
 
 ## Why It Doesn't Work on Stock Raspberry Pi OS Trixie
 
-Trixie (Debian 13, kernel 6.12+, 64-bit ARM64) broke compatibility with this board
-on three fronts:
+Trixie (Debian 13, kernel 6.12+, 64-bit ARM64) broke compatibility on three
+fronts:
 
-**1 — FBTFT removed.**  The `fbtft`, `fbtft_device`, and `fb_ili9481` kernel
-modules that previously drove this class of display were removed from the Raspberry
-Pi kernel after Bullseye. Without them, nothing initializes the ILI9481.
-
-**2 — Device-tree overlays removed.**  Overlays such as `dtoverlay=piscreen`,
-`dtoverlay=kedei`, and `dtoverlay=ili9481` no longer ship with Trixie. Without an
-overlay, the kernel assigns no GPIO pins and registers no framebuffer.
-
-**3 — 64-bit ABI.**  Any 32-bit ARMHF `.ko` compiled for an older kernel cannot
-load into a 64-bit ARM64 kernel.
+1. **FBTFT removed** — The `fbtft`, `fbtft_device`, and `fb_ili9481` kernel
+   modules were removed from the Raspberry Pi kernel after Bullseye.
+2. **Device-tree overlays removed** — Overlays like `piscreen`, `kedei`,
+   `ili9481` no longer ship. KMS/DRM overlays do not support parallel GPIO
+   panels.
+3. **64-bit ABI** — Any 32-bit `.ko` compiled for an older kernel cannot load.
 
 **Result:** the shield receives power but no initialization commands, so the LCD
-stays white permanently.
+stays **white** permanently.
 
 ---
 
 ## This Driver
 
-`ili9481-gpio` is a self-contained, out-of-tree kernel module that **replaces the
-legacy fbtft dependency entirely**. Written from scratch for **kernel 6.12+** using
-modern Linux APIs:
+`ili9481-fb` is a **userspace daemon** that replaces the legacy FBTFT dependency
+entirely. It avoids all kernel hooks and is maintainable across future kernels:
 
-| Feature           | Implementation                                   |
-|-------------------|--------------------------------------------------|
-| GPIO access       | `gpiod` descriptor API (`devm_gpiod_get_array`)  |
-| Framebuffer       | `fbdev` with `fb_deferred_io`                    |
-| Device binding    | Platform driver matched via DTS `compatible`     |
-| Module lifecycle  | Single self-contained `.ko`, no fbtft dependency |
+| Feature           | Implementation                                  |
+| ----------------- | ----------------------------------------------- |
+| GPIO access       | MMIO via `/dev/gpiomem` (BCM283x registers)     |
+| Pixel source      | Mirrors `/dev/fb0` (HDMI via vc4drmfb)          |
+| Pixel format      | Converts 32bpp XRGB8888 → 12bpp RGB444          |
+| Scaling           | Nearest-neighbor from HDMI resolution → 480×320 |
+| Bus interface     | 12-bit 8080 parallel with precomputed LUTs      |
+| Service lifecycle | systemd unit, auto-start on boot                |
 
-The driver registers `/dev/fbN` and provides a standard Linux framebuffer usable
-with `fbcon`, X11 (`xf86-video-fbdev`), SDL, and direct `write()` / `mmap()`.
+### How it works
+
+1. The daemon opens `/dev/fb0` (HDMI framebuffer) and mmaps it read-only.
+2. GPIO pins are configured as outputs via MMIO writes to `/dev/gpiomem`.
+3. The ILI9481 is hardware-reset and sent its full initialization sequence
+   with COLMOD = 0x03 (RGB444 mode).
+4. Every frame interval (1000/fps ms):
+   - Read the HDMI framebuffer
+   - Convert 32bpp XRGB8888 → 12bpp RGB444
+   - Nearest-neighbor scale to 480×320 (or 320×480 depending on rotation)
+   - Set CASET/PASET/RAMWR window
+   - Stream all 153,600 pixels via GPIO bit-banging
+5. On SIGTERM/SIGINT, the display is powered off cleanly (DISPOFF + SLPIN).
+
+### Pixel write path
+
+Each 12-bit pixel write:
+
+1. Look up SET/CLR masks from precomputed LUTs (256-entry for DB0–DB7,
+   16-entry for DB8–DB11)
+2. Write GPSET0/GPCLR0 to place the 12-bit value on the data bus
+3. Assert WR low (GPCLR)
+4. DMB barrier (≥ 15 ns hold time)
+5. Release WR high — rising edge latches the pixel into the ILI9481
 
 ### ILI9481 initialization sequence
 
-On probe the driver (`driver/ili9481-gpio.c:115–134`):
+On startup the daemon:
 
-1. Pulses RST low 20 ms → high 20 ms (hardware reset)
+1. Pulses RST low 20 ms → high 120 ms (hardware reset)
 2. Sends the full initialization command sequence:
    - Software reset (0x01)
    - Sleep Out (0x11)
    - Power Control (0xD0, 0xD1, 0xD2)
    - Panel Drive (0xC0), Frame Rate (0xC5)
    - Gamma (0xC8, 12 bytes)
-   - Pixel Format (0x3A, 0x55 = RGB565)
+   - **Pixel Format (0x3A, 0x03 = RGB444)**
    - Display On (0x29)
 3. Writes MADCTL (0x36) for the selected rotation
-4. Registers the framebuffer
-
-The complete init table is in `driver/ili9481-gpio.h:93–124`.
 
 ---
 
 ## Target Hardware
 
-- **Display:** 320×480 TFT, ILI9481 controller, RGB565
-- **Interface:** 16-bit 8080 parallel over Raspberry Pi GPIO header
+- **Display:** 320×480 TFT, ILI9481 controller, RGB444
+- **Interface:** 12-bit 8080 parallel over 26-pin GPIO header
 - **Level shifting:** 74HC245 / 74HCT245 bus transceivers (3.3 V → 5 V)
-- **Touch (optional):** XPT2046 / ADS7846 over SPI
-- **Board:** Raspberry Pi 3B / 3B+ / 4B with 40-pin header
+- **Touch (optional):** XPT2046 / ADS7846 over SPI (unreliable, shared pins)
+- **Boards:** Raspberry Pi 1/2/3/4/Zero/Zero 2 W — **NOT Pi 5**
 
 ---
 
@@ -132,8 +173,9 @@ sudo ./install.sh [OPTIONS]
 
   --rotate=DEG      Display rotation: 0, 90, 180, 270 (default: 270)
   --fps=N           Framebuffer refresh rate (default: 30)
-  --no-touch        Skip XPT2046/ADS7846 touch overlay
-  --touch-irq=GPIO  Touch interrupt GPIO (default: 17)
+  --touch           Enable XPT2046 touch (WARNING: conflicts with data bus)
+  --no-touch        Skip touch setup (default)
+  --x11-on-tft      Redirect X11 desktop to TFT (disables HDMI desktop)
 ```
 
 ### Uninstall
@@ -150,75 +192,88 @@ sudo reboot
 After installing and rebooting:
 
 ```bash
-# Module loaded?
-lsmod | grep ili9481_gpio
+# Daemon running?
+systemctl status ili9481-fb.service
 
-# Framebuffer registered?
-ls -l /dev/fb*
-cat /sys/class/graphics/fb0/name     # should print "ili9481"
+# Source framebuffer present?
+ls -l /dev/fb0
+cat /sys/class/graphics/fb0/name     # should print "vc4drmfb" or similar
 
-# Kernel messages
-dmesg | grep -i ili9481
+# Daemon log messages
+journalctl -u ili9481-fb -n 20
 
 # Full validation suite
 sudo ./scripts/test-display.sh
 
-# Write random noise to the display
+# Write random noise to HDMI fb — should appear on TFT within one frame
 sudo dd if=/dev/urandom of=/dev/fb0 bs=307200 count=1
 ```
 
-If random colour noise appears on the panel, the driver and GPIO path are working.
+If random colour noise appears on the TFT panel, the daemon is correctly
+mirroring the HDMI framebuffer via GPIO.
 
 ---
 
-## GPIO Pin Mapping
+## GPIO Pin Mapping (26-Pin Header)
 
-The mapping matches the standard Kedei / Inland wiring verified against the board
-hardware. Edit `driver/dts/inland-ili9481.dts` (or the generated DTS produced by
-`install.sh`) if your board differs.
+The mapping matches the standard Inland / Kuman / MCUfriend wiring for
+**26-pin** TFT shields. All pins are within the original 26-pin GPIO header.
 
-| Signal | GPIO (BCM) | Direction | Polarity    |
-|--------|------------|-----------|-------------|
-| RST    | 27         | Output    | Active-low  |
-| DC/RS  | 22         | Output    | Active-high |
-| WR     | 17         | Output    | Active-low  |
-| DB0    | 7          | Output    | Active-high |
-| DB1    | 8          | Output    | Active-high |
-| DB2    | 25         | Output    | Active-high |
-| DB3    | 24         | Output    | Active-high |
-| DB4    | 23         | Output    | Active-high |
-| DB5    | 18         | Output    | Active-high |
-| DB6    | 15         | Output    | Active-high |
-| DB7    | 14         | Output    | Active-high |
-| DB8    | 12         | Output    | Active-high |
-| DB9    | 16         | Output    | Active-high |
-| DB10   | 20         | Output    | Active-high |
-| DB11   | 21         | Output    | Active-high |
-| DB12   | 5          | Output    | Active-high |
-| DB13   | 6          | Output    | Active-high |
-| DB14   | 13         | Output    | Active-high |
-| DB15   | 19         | Output    | Active-high |
+### Control signals
 
-> **Note:** The previous FBTFT overlay used GPIO 23 for both RST and DB4 — that
-> conflict has been corrected. RST is now on GPIO 27 and the WR strobe (which the
-> old overlay omitted entirely) is on GPIO 17.
+| Signal | GPIO (BCM) | Pi Pin | Direction | Polarity    |
+| ------ | ---------- | ------ | --------- | ----------- |
+| RST    | 25         | 22     | Output    | Active-low  |
+| CS     | 8          | 24     | Output    | Active-low  |
+| DC/RS  | 24         | 18     | Output    | Active-high |
+| WR     | 23         | 16     | Output    | Active-low  |
+| RD     | 18         | 12     | Output    | Held HIGH   |
+
+### Data bus — Lower byte (DB0–DB7)
+
+| Signal | GPIO (BCM) | Pi Pin |
+| ------ | ---------- | ------ |
+| DB0    | 9          | 21     |
+| DB1    | 11         | 23     |
+| DB2    | 10         | 19     |
+| DB3    | 22         | 15     |
+| DB4    | 27         | 13     |
+| DB5    | 17         | 11     |
+| DB6    | 4          | 7      |
+| DB7    | 3          | 5      |
+
+### Data bus — Upper nibble (DB8–DB11)
+
+| Signal | GPIO (BCM) | Pi Pin |
+| ------ | ---------- | ------ |
+| DB8    | 14         | 8      |
+| DB9    | 15         | 10     |
+| DB10   | 2          | 3      |
+| DB11   | 7          | 26     |
+
+### Not connected (absent on 26-pin header)
+
+| Signal | Would need | Note                                      |
+| ------ | ---------- | ----------------------------------------- |
+| DB12   | Pin 32     | GPIO 12 — not available on 26-pin shields |
+| DB13   | Pin 33     | GPIO 13 — not available                   |
+| DB14   | Pin 35     | GPIO 19 — not available                   |
+| DB15   | Pin 36     | GPIO 16 — not available                   |
+
+> **Important:** Waveshare, LCD-show, and FBTFT flexfb pin maps **do not apply**
+> to this board. Those projects target 40-pin boards with 8-bit or 16-bit SPI/
+> parallel interfaces.
 
 ---
 
 ## Touch Support
 
-The XPT2046 / ADS7846 resistive touch controller communicates over SPI. `install.sh`
-adds an `ads7846` kernel overlay and enables SPI when `--no-touch` is not passed.
+The XPT2046 / ADS7846 resistive touch controller communicates over SPI. On
+these 26-pin boards, the SPI chip-select lines **share pins with the parallel
+data bus**, making touch unreliable.
 
-**Hardware conflict:** GPIO 7 (DB0) is also SPI0 CE1, and GPIO 8 (DB1) is SPI0 CE0.
-These pins are shared between the 16-bit parallel data bus and the SPI chip-select
-outputs. On this Inland board variant the SPI signals are not cleanly routed at the
-GPIO header, so **touch is unreliable**. If touch events are erratic or absent,
-reinstall with `--no-touch`.
-
-Touch calibration for X11 is written to
-`/etc/X11/xorg.conf.d/99-inland-touch.conf`. The affine transformation matrix can
-be tuned by re-running `install.sh --rotate=<DEG>`.
+Use `--touch` at install time to enable it, but expect conflicts. If touch
+events are erratic or absent, reinstall with `--no-touch` (the default).
 
 ---
 
@@ -227,73 +282,76 @@ be tuned by re-running `install.sh --rotate=<DEG>`.
 ```
 install.sh                      # Automated installer
 uninstall.sh                    # Automated uninstaller
-driver/
-  ili9481-gpio.h                # Register defines, MADCTL values & init table
-  ili9481-gpio.c                # Kernel module source
-  Makefile                      # Kbuild makefile
-  dts/
-    inland-ili9481.dts          # Reference device-tree overlay
+include/
+  ili9481_hw.h                  # Register defines, pin constants, MADCTL values
+src/
+  bus/
+    gpio_mmio.c / .h            # MMIO GPIO bus — LUTs, 12-bit writes
+    timing.h                    # DMB barrier, busy-wait ndelay
+  display/
+    ili9481.c / .h              # Init sequence, CASET/PASET/RAMWR flush
+    framebuffer.c / .h          # Mirror fb0: mmap, convert, scale, flush loop
+  touch/
+    xpt2046.c / .h              # SPI touch reader (optional)
+    uinput_touch.c / .h         # uinput virtual touchscreen (optional)
+  core/
+    service_main.c              # Daemon entry point, signal handling
+    config.c / .h               # INI config parser + CLI args
+    logging.c / .h              # stderr + syslog logging
+config/
+  ili9481.conf                  # Default configuration file
+systemd/
+  ili9481-fb.service            # systemd unit file
 scripts/
   test-display.sh               # Post-install validation
   tft-diagnose.sh               # Boot-to-desktop diagnostics
+Makefile                        # Build system
 ```
-
----
-
-## How It Works
-
-1. `install.sh` generates a device-tree overlay from `driver/dts/inland-ili9481.dts`
-   (substituting the chosen rotation and FPS), compiles it with `dtc`, and copies it
-   to `/boot/firmware/overlays/`.
-2. `config.txt` is updated to load `inland-ili9481-overlay` and disable KMS on boot.
-3. On boot, `ili9481-gpio.ko` is loaded and matches
-   `compatible = "inland,ili9481-gpio"` from the overlay.
-4. The probe function acquires 19 GPIOs via the `gpiod` API
-   (16 data lines + DC + WR + RST).
-5. The ILI9481 is hardware-reset and sent its full initialization sequence.
-6. A `framebuffer_alloc`'d fbdev device is registered with `fb_deferred_io`.
-7. Every frame interval (`1000/fps` ms), dirty pages trigger a full-screen flush
-   that bit-bangs all 153,600 pixels through the 16-bit parallel bus.
-8. `fbcon` maps virtual consoles to the new framebuffer; X11 uses `fbdev`.
-
-### Pixel write path
-
-Each 16-bit pixel write (`driver/ili9481-gpio.c:64–78`):
-
-1. Place 16-bit value on DB0–DB15 via `gpiod_set_array_value`
-2. Assert WR low (gpiod logical-1 → pin LOW, active-low polarity)
-3. Hold ≥ 15 ns (`ndelay(15)`)
-4. De-assert WR high — rising edge latches the pixel into the ILI9481
 
 ---
 
 ## Timing & Performance
 
-| Parameter               | Value                          |
-|-------------------------|--------------------------------|
-| WR pulse low (tWRL)     | ≥ 15 ns                        |
-| WR pulse high (tWRH)    | ≥ 15 ns                        |
-| Pixels per frame        | 153,600 (480 × 320)            |
-| Bytes per frame         | 307,200 (RGB565)               |
-| Target throughput       | 25–30 FPS (~7.7 MB/s)          |
-| Effective FPS (typical) | 5–15 FPS (gpiod kernel overhead) |
+| Parameter               | Value                         |
+| ----------------------- | ----------------------------- |
+| WR pulse low (tWRL)     | ≥ 15 ns                       |
+| WR pulse high (tWRH)    | ≥ 15 ns                       |
+| Pixels per frame        | 153,600 (480 × 320)           |
+| Bits per pixel          | 12 (RGB444)                   |
+| Target throughput       | 25–30 FPS                     |
+| Effective FPS (typical) | 5–15 FPS (GPIO MMIO overhead) |
 
-The effective framerate falls below the target because each pixel requires multiple
-kernel API calls through the `gpiod` descriptor layer. The display is well-suited
-for consoles, static UIs, and lightweight desktops; it is not suitable for video or
-fast animation.
+The daemon uses precomputed lookup tables to minimise per-pixel GPIO register
+writes. The effective framerate is constrained by MMIO register access latency
+and is well-suited for consoles, static UIs, and lightweight desktops.
 
 ---
 
 ## Limitations
 
-- Refresh rate is constrained by GPIO bit-bang overhead through the gpiod API
-  (~5–15 FPS depending on Pi model and kernel scheduling).
+- Refresh rate is constrained by GPIO MMIO overhead (~5–15 FPS depending on Pi
+  model).
 - Not suitable for video playback or fast animation.
-- Touch is unreliable on the Inland board variant due to SPI/data-bus GPIO conflicts.
-- Works well for consoles, static UIs, and lightweight desktops.
-- For new projects, a SPI-based ILI9341/ILI9488 or a DSI touchscreen panel offers
-  better compatibility, performance, and long-term kernel support.
+- Only 12 bits per pixel (4096 colours) — limited by the 26-pin header wiring.
+- Touch is unreliable on boards where SPI shares pins with the data bus.
+- Pi 5 is **not supported** (RP1 has a different GPIO register layout).
+- For new projects, SPI-based ILI9341/ILI9488 or DSI panels offer better
+  performance and kernel support.
+
+---
+
+## Why Userspace?
+
+This is the only viable modern approach because:
+
+- Trixie (Bookworm+) removed FBTFT from the kernel
+- KMS/DRM overlays no longer support parallel GPIO panels
+- Kernel headers change and will keep changing
+- Display overlays relying on SPI or 8/16-bit parallel FBTFT cannot be built or
+  loaded on current kernels
+
+The daemon approach avoids all kernel hooks and is maintainable on future
+kernels without recompilation against kernel headers.
 
 ---
 

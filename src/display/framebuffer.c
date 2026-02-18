@@ -1,7 +1,15 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * framebuffer.c — Virtual framebuffer provider: loads vfb module, opens fb
- *                 device, mmaps video memory, and runs the flush loop.
+ * framebuffer.c — Mirror an existing Linux framebuffer to the ILI9481 TFT
+ *
+ * Opens /dev/fb0 (or whichever device is configured), mmaps it read-only,
+ * and each frame converts pixels to 12-bit RGB444 + nearest-neighbor
+ * scales to the TFT resolution before flushing to the display via GPIO.
+ *
+ * RGB444 packing: bits [11:8]=R, [7:4]=G, [3:0]=B.
+ * Only DB0–DB11 are wired on 26-pin shields; DB12–DB15 are absent.
+ *
+ * No kernel modules are loaded — works with the stock vc4drmfb framebuffer.
  */
 
 #include <stdio.h>
@@ -27,37 +35,116 @@
 
 struct fb_provider {
     int         fd;
-    uint16_t   *buffer;     /* mmap'd framebuffer memory */
-    uint32_t    size;       /* buffer size in bytes      */
-    uint16_t    width;
-    uint16_t    height;
+    uint8_t    *map;            /* raw mmap'd source framebuffer     */
+    uint32_t    map_size;       /* mmap'd region size in bytes       */
+
+    /* Source framebuffer properties */
+    uint32_t    src_width;
+    uint32_t    src_height;
+    uint32_t    src_bpp;        /* bits per pixel (16 or 32)         */
+    uint32_t    src_stride;     /* bytes per source row (line_length)*/
+
+    /* RGB bit-field positions (for 32bpp conversion) */
+    uint32_t    red_offset;
+    uint32_t    red_length;
+    uint32_t    green_offset;
+    uint32_t    green_length;
+    uint32_t    blue_offset;
+    uint32_t    blue_length;
+
+    /* Pre-allocated scale buffer (TFT-sized, RGB444 in uint16_t) */
+    uint16_t   *scale_buf;
+    uint32_t    tft_width;
+    uint32_t    tft_height;
 };
 
 /* ------------------------------------------------------------------ */
-/* vfb module loading                                                 */
+/* Pixel format conversion                                            */
 /* ------------------------------------------------------------------ */
 
-static int load_vfb_module(uint16_t width, uint16_t height)
+/*
+ * Convert a 32-bit pixel to RGB444 using the source fb's bit-field layout.
+ * Handles XRGB8888, ARGB8888, BGRX8888, and any other layout described
+ * by the fb_var_screeninfo red/green/blue offset/length fields.
+ *
+ * Result: bits [11:8]=R, [7:4]=G, [3:0]=B.
+ */
+static inline uint16_t pixel32_to_rgb444(uint32_t px,
+                                          uint32_t r_off, uint32_t r_len,
+                                          uint32_t g_off, uint32_t g_len,
+                                          uint32_t b_off, uint32_t b_len)
 {
-    char cmd[256];
-    int ret;
+    uint32_t r = (px >> r_off) & ((1u << r_len) - 1);
+    uint32_t g = (px >> g_off) & ((1u << g_len) - 1);
+    uint32_t b = (px >> b_off) & ((1u << b_len) - 1);
 
-    /* First try dry-run to see if vfb is available */
-    ret = system("modprobe --dry-run vfb 2>/dev/null");
-    if (ret != 0) {
-        log_error("vfb module is not available (CONFIG_FB_VIRTUAL not enabled?)");
-        return -1;
+    /* Normalise each channel to 4 bits */
+    if (r_len > 4) r >>= (r_len - 4); else if (r_len < 4) r <<= (4 - r_len);
+    if (g_len > 4) g >>= (g_len - 4); else if (g_len < 4) g <<= (4 - g_len);
+    if (b_len > 4) b >>= (b_len - 4); else if (b_len < 4) b <<= (4 - b_len);
+
+    return (uint16_t)((r << 8) | (g << 4) | b);
+}
+
+/*
+ * Convert a 16-bit RGB565 pixel to RGB444.
+ */
+static inline uint16_t pixel565_to_rgb444(uint16_t px)
+{
+    uint32_t r5 = (px >> 11) & 0x1F;
+    uint32_t g6 = (px >> 5) & 0x3F;
+    uint32_t b5 = px & 0x1F;
+
+    return (uint16_t)(((r5 >> 1) << 8) | ((g6 >> 2) << 4) | (b5 >> 1));
+}
+
+/* ------------------------------------------------------------------ */
+/* Scale + convert a full frame into the pre-allocated TFT buffer     */
+/* ------------------------------------------------------------------ */
+
+static void scale_frame(struct fb_provider *fb)
+{
+    const uint32_t tw = fb->tft_width;
+    const uint32_t th = fb->tft_height;
+    const uint32_t sw = fb->src_width;
+    const uint32_t sh = fb->src_height;
+    const uint32_t stride = fb->src_stride;
+    const uint8_t *src = fb->map;
+
+    if (fb->src_bpp == 16) {
+        /* 16bpp RGB565 source → convert to RGB444 + optional scaling */
+        for (uint32_t dy = 0; dy < th; dy++) {
+            uint32_t sy = dy * sh / th;
+            const uint16_t *srow = (const uint16_t *)(src + sy * stride);
+            uint16_t *drow = &fb->scale_buf[dy * tw];
+            for (uint32_t dx = 0; dx < tw; dx++) {
+                uint32_t sx = dx * sw / tw;
+                drow[dx] = pixel565_to_rgb444(srow[sx]);
+            }
+        }
+        return;
     }
 
-    snprintf(cmd, sizeof(cmd),
-             "modprobe vfb vfb_enable=1 videomemorysize=%u",
-             (unsigned)(width * height * 2));
-    ret = system(cmd);
-    if (ret != 0) {
-        log_warn("modprobe vfb returned %d (may already be loaded)", ret);
-    }
+    /* 32bpp source: convert to RGB444 + scale in one pass */
+    const uint32_t r_off = fb->red_offset;
+    const uint32_t r_len = fb->red_length;
+    const uint32_t g_off = fb->green_offset;
+    const uint32_t g_len = fb->green_length;
+    const uint32_t b_off = fb->blue_offset;
+    const uint32_t b_len = fb->blue_length;
 
-    return 0;
+    for (uint32_t dy = 0; dy < th; dy++) {
+        uint32_t sy = dy * sh / th;
+        const uint32_t *srow = (const uint32_t *)(src + sy * stride);
+        uint16_t *drow = &fb->scale_buf[dy * tw];
+        for (uint32_t dx = 0; dx < tw; dx++) {
+            uint32_t sx = dx * sw / tw;
+            drow[dx] = pixel32_to_rgb444(srow[sx],
+                                          r_off, r_len,
+                                          g_off, g_len,
+                                          b_off, b_len);
+        }
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -65,117 +152,97 @@ static int load_vfb_module(uint16_t width, uint16_t height)
 /* ------------------------------------------------------------------ */
 
 struct fb_provider *fb_provider_init(const char *fb_device,
-                                      uint16_t width, uint16_t height)
+                                      uint16_t tft_width, uint16_t tft_height)
 {
-    struct fb_provider *fb;
     struct fb_var_screeninfo vinfo;
     struct fb_fix_screeninfo finfo;
-    int attempts = 0;
-    int fd = -1;
+    int fd;
 
-    /* Load the vfb kernel module */
-    if (load_vfb_module(width, height) < 0)
-        return NULL;
-
-    /* Retry open for up to 2 seconds (module load can be async) */
-    while (attempts < 20) {
-        fd = open(fb_device, O_RDWR);
-        if (fd >= 0)
-            break;
-        usleep(100000); /* 100 ms */
-        attempts++;
-    }
-
+    fd = open(fb_device, O_RDONLY);
     if (fd < 0) {
-        log_error("Cannot open %s after 2s: %s", fb_device, strerror(errno));
+        log_error("Cannot open %s: %s", fb_device, strerror(errno));
         return NULL;
     }
 
     /* Query variable screen info */
     if (ioctl(fd, FBIOGET_VSCREENINFO, &vinfo) < 0) {
-        log_error("FBIOGET_VSCREENINFO failed: %s", strerror(errno));
+        log_error("FBIOGET_VSCREENINFO on %s failed: %s", fb_device, strerror(errno));
         close(fd);
         return NULL;
     }
 
-    /* Try to set the resolution and bpp we need */
-    vinfo.xres = width;
-    vinfo.yres = height;
-    vinfo.xres_virtual = width;
-    vinfo.yres_virtual = height;
-    vinfo.bits_per_pixel = 16;
-
-    /* RGB565 layout */
-    vinfo.red.offset     = 11;  vinfo.red.length     = 5;
-    vinfo.green.offset   = 5;   vinfo.green.length   = 6;
-    vinfo.blue.offset    = 0;   vinfo.blue.length    = 5;
-    vinfo.transp.offset  = 0;   vinfo.transp.length  = 0;
-
-    if (ioctl(fd, FBIOPUT_VSCREENINFO, &vinfo) < 0) {
-        log_warn("FBIOPUT_VSCREENINFO failed: %s (using current settings)",
-                 strerror(errno));
-        /* Re-read to get actual settings */
-        ioctl(fd, FBIOGET_VSCREENINFO, &vinfo);
-    }
-
-    /* Verify we got what we need */
-    if (vinfo.bits_per_pixel != 16) {
-        log_error("Framebuffer is %u bpp, need 16 bpp", vinfo.bits_per_pixel);
+    if (vinfo.bits_per_pixel != 16 && vinfo.bits_per_pixel != 32) {
+        log_error("Unsupported pixel format: %u bpp (need 16 or 32)",
+                  vinfo.bits_per_pixel);
         close(fd);
         return NULL;
     }
 
-    log_info("Framebuffer: %ux%u %ubpp (requested %ux%u)",
-             vinfo.xres, vinfo.yres, vinfo.bits_per_pixel, width, height);
-
-    /* Query fixed screen info for mmap size */
+    /* Query fixed screen info for line_length and mmap size */
     if (ioctl(fd, FBIOGET_FSCREENINFO, &finfo) < 0) {
-        log_error("FBIOGET_FSCREENINFO failed: %s", strerror(errno));
+        log_error("FBIOGET_FSCREENINFO on %s failed: %s", fb_device, strerror(errno));
         close(fd);
         return NULL;
     }
 
-    uint32_t buf_size = (uint32_t)vinfo.xres * vinfo.yres * (vinfo.bits_per_pixel / 8);
-    uint32_t mmap_size = finfo.smem_len > 0 ? finfo.smem_len : buf_size;
+    uint32_t mmap_size = finfo.smem_len;
+    if (mmap_size == 0)
+        mmap_size = vinfo.yres_virtual * finfo.line_length;
+    if (mmap_size == 0)
+        mmap_size = vinfo.yres * vinfo.xres * (vinfo.bits_per_pixel / 8);
 
-    void *map = mmap(NULL, mmap_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    void *map = mmap(NULL, mmap_size, PROT_READ, MAP_SHARED, fd, 0);
     if (map == MAP_FAILED) {
-        log_error("mmap framebuffer failed: %s", strerror(errno));
+        log_error("mmap %s failed: %s", fb_device, strerror(errno));
         close(fd);
         return NULL;
     }
 
-    fb = calloc(1, sizeof(*fb));
-    if (!fb) {
+    /* Allocate the TFT-sized output buffer */
+    uint16_t *scale_buf = calloc((uint32_t)tft_width * tft_height, sizeof(uint16_t));
+    if (!scale_buf) {
+        log_error("Cannot allocate scale buffer (%ux%u)", tft_width, tft_height);
         munmap(map, mmap_size);
         close(fd);
         return NULL;
     }
 
-    fb->fd = fd;
-    fb->buffer = (uint16_t *)map;
-    fb->size = mmap_size;
-    fb->width = vinfo.xres;
-    fb->height = vinfo.yres;
+    struct fb_provider *fb = calloc(1, sizeof(*fb));
+    if (!fb) {
+        free(scale_buf);
+        munmap(map, mmap_size);
+        close(fd);
+        return NULL;
+    }
 
-    log_info("Framebuffer %s opened: %ux%u, %u bytes mapped",
-             fb_device, fb->width, fb->height, fb->size);
+    fb->fd          = fd;
+    fb->map         = (uint8_t *)map;
+    fb->map_size    = mmap_size;
+    fb->src_width   = vinfo.xres;
+    fb->src_height  = vinfo.yres;
+    fb->src_bpp     = vinfo.bits_per_pixel;
+    fb->src_stride  = finfo.line_length;
+    fb->red_offset  = vinfo.red.offset;
+    fb->red_length  = vinfo.red.length;
+    fb->green_offset = vinfo.green.offset;
+    fb->green_length = vinfo.green.length;
+    fb->blue_offset  = vinfo.blue.offset;
+    fb->blue_length  = vinfo.blue.length;
+    fb->scale_buf   = scale_buf;
+    fb->tft_width   = tft_width;
+    fb->tft_height  = tft_height;
+
+    log_info("Source framebuffer %s: %ux%u %ubpp (stride=%u)",
+             fb_device, fb->src_width, fb->src_height,
+             fb->src_bpp, fb->src_stride);
+    log_info("TFT target: %ux%u RGB444 — scale+convert",
+             tft_width, tft_height);
 
     return fb;
 }
 
-uint16_t *fb_provider_get_buffer(struct fb_provider *fb)
-{
-    return fb ? fb->buffer : NULL;
-}
-
-uint32_t fb_provider_get_size(struct fb_provider *fb)
-{
-    return fb ? fb->size : 0;
-}
-
 void fb_flush_loop(struct fb_provider *fb, struct gpio_bus *bus,
-                   uint16_t width, uint16_t height,
+                   uint16_t tft_width, uint16_t tft_height,
                    int fps, volatile int *running)
 {
     struct timespec next_tick;
@@ -186,15 +253,19 @@ void fb_flush_loop(struct fb_provider *fb, struct gpio_bus *bus,
     clock_gettime(CLOCK_MONOTONIC, &next_tick);
     fps_start = next_tick;
 
-    log_info("Flush loop starting: %ux%u @ %d FPS (interval=%ld ns)",
-             width, height, fps, frame_ns);
+    log_info("Flush loop starting: mirror %ux%u %ubpp → %ux%u RGB444 @ %d FPS",
+             fb->src_width, fb->src_height, fb->src_bpp,
+             tft_width, tft_height, fps);
 
     while (*running) {
         /* Wait until the next frame time */
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next_tick, NULL);
 
-        /* Flush the entire framebuffer to the display */
-        ili9481_flush_full(bus, width, height, fb->buffer);
+        /* Convert and scale the source framebuffer into the TFT buffer */
+        scale_frame(fb);
+
+        /* Flush the scaled RGB444 buffer to the display */
+        ili9481_flush_full(bus, tft_width, tft_height, fb->scale_buf);
 
         frame_count++;
 
@@ -226,8 +297,11 @@ void fb_provider_destroy(struct fb_provider *fb)
     if (!fb)
         return;
 
-    if (fb->buffer && fb->buffer != MAP_FAILED)
-        munmap(fb->buffer, fb->size);
+    if (fb->scale_buf)
+        free(fb->scale_buf);
+
+    if (fb->map && fb->map != MAP_FAILED)
+        munmap(fb->map, fb->map_size);
 
     if (fb->fd >= 0)
         close(fb->fd);
