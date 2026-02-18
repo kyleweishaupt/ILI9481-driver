@@ -1,13 +1,14 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0-only
 #
-# install.sh — Inland TFT35 ILI9481 (16-bit parallel GPIO) installer
+# install.sh — Inland TFT35 ILI9481 (userspace framebuffer daemon) installer
 #
-# Builds a self-contained out-of-tree kernel module (ili9481-gpio) from the
-# local driver/ directory, generates a device-tree overlay, configures boot
-# parameters, and optionally sets up ADS7846/XPT2046 touch support.
+# Builds and installs the ili9481-fb userspace daemon that drives the display
+# via MMIO GPIO writes, mirroring a kernel vfb virtual framebuffer to the
+# ILI9481 panel.  No kernel headers, DKMS, or custom kernel modules required.
 #
 # Targets: Raspberry Pi OS Trixie (Debian 13, kernel 6.12+, 64-bit)
+#          Raspberry Pi 1/2/3/4/Zero/Zero 2 W (NOT Pi 5)
 #
 # Usage:  sudo ./install.sh [OPTIONS]
 
@@ -19,11 +20,7 @@ set -euo pipefail
 
 ROTATE=270
 FPS=30
-TOUCH=1
-TOUCH_IRQ=17
-TOUCH_XOHMS=150
-TOUCH_PMAX=255
-FB_MAP=10
+TOUCH=0
 
 # =====================================================================
 # Argument parsing
@@ -33,14 +30,14 @@ for arg in "$@"; do
     case "$arg" in
         --rotate=*)    ROTATE="${arg#*=}" ;;
         --fps=*)       FPS="${arg#*=}" ;;
+        --touch)       TOUCH=1 ;;
         --no-touch)    TOUCH=0 ;;
-        --touch-irq=*) TOUCH_IRQ="${arg#*=}" ;;
         --help|-h)
             echo "Usage: sudo ./install.sh [OPTIONS]"
             echo "  --rotate=DEG      Display rotation: 0, 90, 180, 270 (default: 270)"
             echo "  --fps=N           Framebuffer refresh rate (default: 30)"
-            echo "  --no-touch        Skip XPT2046/ADS7846 touch setup"
-            echo "  --touch-irq=GPIO  Touch IRQ GPIO (default: 17)"
+            echo "  --touch           Enable XPT2046 touch (WARNING: conflicts with data bus)"
+            echo "  --no-touch        Skip touch setup (default)"
             exit 0
             ;;
         *)
@@ -116,18 +113,14 @@ remove_lines() {
 # =====================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-DRIVER_DIR="${SCRIPT_DIR}/driver"
 
-echo "Inland TFT35 ILI9481 installer (self-contained driver)"
+echo "Inland TFT35 ILI9481 installer (userspace daemon)"
 echo "Config:   $CONFIG"
 echo "Cmdline:  $CMDLINE"
 echo "Rotation: $ROTATE"
 echo "FPS:      $FPS"
 echo "Touch:    $([ "$TOUCH" -eq 1 ] && echo yes || echo no)"
 echo
-
-KERNEL_RELEASE="$(uname -r)"
-KERNEL_BUILD_DIR="/lib/modules/${KERNEL_RELEASE}/build"
 
 # =====================================================================
 # [1/9] Install required packages
@@ -137,119 +130,79 @@ echo "[1/9] Installing required packages"
 apt-get update
 apt-get install -y \
     build-essential \
-    flex \
-    bison \
-    bc \
-    libssl-dev \
-    device-tree-compiler \
     fbset \
     xserver-xorg-video-fbdev \
     xserver-xorg-input-evdev \
     xinput
 
-if [ ! -f "${KERNEL_BUILD_DIR}/Makefile" ]; then
-    echo "Kernel headers for ${KERNEL_RELEASE} not found. Attempting install..."
-    apt-get install -y "linux-headers-${KERNEL_RELEASE}"
-fi
+# =====================================================================
+# [2/9] Build and install ili9481-fb userspace daemon
+# =====================================================================
 
-if [ ! -f "${KERNEL_BUILD_DIR}/Makefile" ]; then
-    echo "Error: kernel headers still missing for ${KERNEL_RELEASE}."
-    echo "Install them manually, then re-run this script."
-    echo "  sudo apt install linux-headers-${KERNEL_RELEASE}"
+echo "[2/9] Building and installing ili9481-fb daemon"
+
+if [ ! -f "${SCRIPT_DIR}/src/core/service_main.c" ]; then
+    echo "Error: source not found at ${SCRIPT_DIR}/src/core/service_main.c"
     exit 1
 fi
 
-# =====================================================================
-# [2/9] Build and install ili9481-gpio kernel module
-# =====================================================================
-
-echo "[2/9] Building and installing ili9481-gpio driver"
-
-if [ ! -f "${DRIVER_DIR}/ili9481-gpio.c" ]; then
-    echo "Error: driver source not found at ${DRIVER_DIR}/ili9481-gpio.c"
-    exit 1
-fi
-
-make -C "${KERNEL_BUILD_DIR}" M="${DRIVER_DIR}" clean   2>/dev/null || true
-make -C "${KERNEL_BUILD_DIR}" M="${DRIVER_DIR}" modules
-make -C "${KERNEL_BUILD_DIR}" M="${DRIVER_DIR}" modules_install
+make -C "${SCRIPT_DIR}" clean 2>/dev/null || true
+make -C "${SCRIPT_DIR}" ENABLE_TOUCH=${TOUCH}
+make -C "${SCRIPT_DIR}" install
 
 # =====================================================================
-# [3/9] Generate and compile device-tree overlay
+# [3/9] Write runtime configuration
 # =====================================================================
 
-echo "[3/9] Writing and compiling overlay"
+echo "[3/9] Writing runtime configuration"
 
-cat > "${OVERLAYS_DIR}/inland-ili9481-overlay.dts" <<EOF
-/dts-v1/;
-/plugin/;
+mkdir -p /etc/ili9481
 
-/ {
-    compatible = "brcm,bcm2835";
+cat > /etc/ili9481/ili9481.conf <<EOF
+# ILI9481 userspace framebuffer daemon configuration
+# Generated by install.sh on $(date)
 
-    fragment@0 {
-        target-path = "/";
-        __overlay__ {
-            inland_tft35: ili9481@0 {
-                compatible = "inland,ili9481-gpio";
-                status     = "okay";
+[display]
+rotation = ${ROTATE}
+fps = ${FPS}
+fb_device = /dev/fb1
 
-                rotate = <${ROTATE}>;
-                fps    = <${FPS}>;
-
-                rst-gpios = <&gpio 27 1>;
-                dc-gpios  = <&gpio 22 0>;
-                wr-gpios  = <&gpio 17 1>;
-
-                data-gpios = <
-                    &gpio  7 0
-                    &gpio  8 0
-                    &gpio 25 0
-                    &gpio 24 0
-                    &gpio 23 0
-                    &gpio 18 0
-                    &gpio 15 0
-                    &gpio 14 0
-
-                    &gpio 12 0
-                    &gpio 16 0
-                    &gpio 20 0
-                    &gpio 21 0
-                    &gpio  5 0
-                    &gpio  6 0
-                    &gpio 13 0
-                    &gpio 19 0
-                >;
-            };
-        };
-    };
-};
+[touch]
+enable_touch = ${TOUCH}
+spi_device = /dev/spidev0.1
+spi_speed = 2000000
 EOF
 
-dtc -@ -I dts -O dtb \
-    -o "${OVERLAYS_DIR}/inland-ili9481-overlay.dtbo" \
-    "${OVERLAYS_DIR}/inland-ili9481-overlay.dts"
-
 # =====================================================================
-# [4/9] Update module dependencies and autoload
+# [4/9] Configure vfb module autoload
 # =====================================================================
 
-echo "[4/9] Updating module dependencies and load hints"
-depmod -a
+echo "[4/9] Configuring vfb module autoload"
+
+# Compute framebuffer size based on rotation
+case "$ROTATE" in
+    90|270)
+        FB_W=480; FB_H=320 ;;
+    *)
+        FB_W=320; FB_H=480 ;;
+esac
+
+cat > /etc/modprobe.d/vfb-ili9481.conf <<EOF
+# Virtual framebuffer for ILI9481 display
+options vfb vfb_enable=1 videomemorysize=$((FB_W * FB_H * 2))
+EOF
 
 cat > /etc/modules-load.d/inland-tft35.conf <<'EOF'
-ili9481-gpio
+vfb
 EOF
 
-if [ "$TOUCH" -eq 1 ]; then
-    ensure_line /etc/modules-load.d/inland-tft35.conf "ads7846"
-fi
-
 # =====================================================================
-# [5/9] Clean stale config entries
+# [5/9] Clean stale config entries from previous kernel-module installs
 # =====================================================================
 
 echo "[5/9] Cleaning old config entries"
+
+# Remove old kernel module / DTS overlay entries
 remove_lines "$CONFIG" \
     '/^# Inland TFT35 SPI display/d' \
     '/^# Inland TFT35 ILI9481 display/d' \
@@ -259,62 +212,51 @@ remove_lines "$CONFIG" \
     '/^dtoverlay=ili9481/d' \
     '/^dtoverlay=inland-ili9481-overlay/d' \
     '/^dtoverlay=ads7846,/d' \
-    '/^dtoverlay=xpt2046,/d'
+    '/^dtoverlay=xpt2046,/d' \
+    '/^disable_fw_kms_setup=1/d'
 
-# =====================================================================
-# [6/9] Configure boot display and touch
-# =====================================================================
-
-echo "[6/9] Configuring boot display and touch"
-
-sed -i 's/^dtoverlay=vc4-kms-v3d/#dtoverlay=vc4-kms-v3d/'     "$CONFIG"
-sed -i 's/^dtoverlay=vc4-fkms-v3d/#dtoverlay=vc4-fkms-v3d/'   "$CONFIG"
-sed -i 's/^display_auto_detect=1/#display_auto_detect=1/'       "$CONFIG"
-
-if ! grep -q '^\[all\]$' "$CONFIG"; then
-    printf '\n[all]\n' >> "$CONFIG"
-fi
-
-cat >> "$CONFIG" <<'EOF'
-
-# BEGIN inland-tft35
-disable_fw_kms_setup=1
-dtoverlay=inland-ili9481-overlay
-EOF
-
-# SPI uses GPIO 7 (CE1) and GPIO 8 (CE0) which conflict with DB0/DB1
-# on the parallel data bus.  Only enable SPI when touch is requested;
-# even then the kernel may report pin-mux conflicts on some boards.
-if [ "$TOUCH" -eq 1 ]; then
-    sed -i '/^# BEGIN inland-tft35$/a dtparam=spi=on' "$CONFIG"
-fi
-
-if [ "$TOUCH" -eq 1 ]; then
-    echo "dtoverlay=ads7846,cs=1,speed=2000000,penirq=${TOUCH_IRQ},penirq_pull=2,xohms=${TOUCH_XOHMS},pmax=${TOUCH_PMAX}" >> "$CONFIG"
-fi
-
-cat >> "$CONFIG" <<'EOF'
-# END inland-tft35
-EOF
-
-# =====================================================================
-# [7/9] Configure fbcon mapping
-# =====================================================================
-
-echo "[7/9] Configuring fbcon mapping"
-
+# Remove old fbcon= mapping from cmdline (vfb doesn't need it)
 sed -i 's/ fbcon=map:[^ ]*//g'  "$CMDLINE"
 sed -i 's/  */ /g'              "$CMDLINE"
 sed -i 's/[[:space:]]*$//'      "$CMDLINE"
-if ! grep -q 'fbcon=map:' "$CMDLINE"; then
-    sed -i "1s/$/ fbcon=map:${FB_MAP}/" "$CMDLINE"
+
+# Restore KMS lines that old installer may have commented out
+# (vfb is fully KMS-compatible — no need to disable KMS)
+sed -i 's/^#\(dtoverlay=vc4-kms-v3d\)/\1/'     "$CONFIG"
+sed -i 's/^#\(dtoverlay=vc4-fkms-v3d\)/\1/'    "$CONFIG"
+sed -i 's/^#\(display_auto_detect=1\)/\1/'      "$CONFIG"
+
+# Remove old DTS overlay artifacts
+rm -f "${OVERLAYS_DIR}/inland-ili9481-overlay.dtbo"
+rm -f "${OVERLAYS_DIR}/inland-ili9481-overlay.dts"
+
+# Remove old kernel module autoload
+if [ -f /etc/modules-load.d/inland-tft35.conf ]; then
+    sed -i '/^ili9481-gpio$/d' /etc/modules-load.d/inland-tft35.conf
+    sed -i '/^ads7846$/d' /etc/modules-load.d/inland-tft35.conf
 fi
 
 # =====================================================================
-# [8/9] X11 framebuffer and touch configuration
+# [6/9] Install systemd service
 # =====================================================================
 
-echo "[8/9] Installing X11 framebuffer and touch configuration"
+echo "[6/9] Installing systemd service"
+
+# Stop old services if running
+systemctl disable --now ili9481-fb.service >/dev/null 2>&1 || true
+systemctl disable --now inland-tft35-boot.service >/dev/null 2>&1 || true
+
+# Install the new daemon service
+cp "${SCRIPT_DIR}/systemd/ili9481-fb.service" /etc/systemd/system/
+
+systemctl daemon-reload
+systemctl enable ili9481-fb.service
+
+# =====================================================================
+# [7/9] X11 framebuffer and touch configuration
+# =====================================================================
+
+echo "[7/9] Installing X11 framebuffer and touch configuration"
 
 mkdir -p /etc/X11/xorg.conf.d
 cat > /etc/X11/xorg.conf.d/99-inland-fbdev.conf <<'EOF'
@@ -330,7 +272,7 @@ if [ "$TOUCH" -eq 1 ]; then
     cat > /etc/X11/xorg.conf.d/99-inland-touch.conf <<EOF
 Section "InputClass"
     Identifier "InlandTouch"
-    MatchProduct "ADS7846 Touchscreen"
+    MatchProduct "ILI9481 Touch"
     Driver "evdev"
     Option "CalibrationMatrix" "${TOUCH_MATRIX}"
     Option "EmulateThirdButton" "true"
@@ -341,10 +283,10 @@ else
 fi
 
 # =====================================================================
-# [9/9] Boot-time framebuffer mapping service
+# [8/9] Boot-time framebuffer mapping service
 # =====================================================================
 
-echo "[9/9] Enabling boot mapping service and selecting X11"
+echo "[8/9] Enabling boot mapping service"
 
 cat > /usr/local/bin/inland-tft35-boot <<'BOOTSCRIPT'
 #!/bin/bash
@@ -355,7 +297,7 @@ for fb_dir in /sys/class/graphics/fb*; do
     [ -d "$fb_dir" ] || continue
     name_file="${fb_dir}/name"
     [ -f "$name_file" ] || continue
-    if grep -qi 'ili9481' "$name_file"; then
+    if grep -qi 'Virtual FB\|vfb' "$name_file"; then
         fb_number="$(basename "$fb_dir" | sed 's/fb//')"
         break
     fi
@@ -396,6 +338,12 @@ EOF
 systemctl daemon-reload
 systemctl enable inland-tft35-boot.service
 
+# =====================================================================
+# [9/9] Switch to X11 if using Wayland
+# =====================================================================
+
+echo "[9/9] Checking desktop backend"
+
 if command -v raspi-config >/dev/null 2>&1; then
     WAYLAND_STATE="$(raspi-config nonint get_wayland 2>/dev/null || echo unknown)"
     if [ "$WAYLAND_STATE" = "0" ]; then
@@ -409,4 +357,8 @@ fi
 
 echo
 echo "Install complete."
+echo "  Binary:  /usr/local/bin/ili9481-fb"
+echo "  Config:  /etc/ili9481/ili9481.conf"
+echo "  Service: ili9481-fb.service"
+echo
 echo "Reboot now: sudo reboot"
