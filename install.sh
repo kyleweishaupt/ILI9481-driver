@@ -101,10 +101,12 @@ echo "FPS: $FPS"
 echo "Touch: $([ "$TOUCH" -eq 1 ] && echo yes || echo no)"
 echo
 
+KERNEL_RELEASE="$(uname -r)"
+KERNEL_BUILD_DIR="/lib/modules/${KERNEL_RELEASE}/build"
+
 echo "[1/9] Installing required packages"
 apt-get update
 apt-get install -y \
-    raspberrypi-kernel-headers \
     git \
     build-essential \
     flex \
@@ -117,6 +119,19 @@ apt-get install -y \
     xserver-xorg-input-evdev \
     xinput
 
+if [ ! -f "${KERNEL_BUILD_DIR}/Makefile" ]; then
+    echo "Kernel headers for ${KERNEL_RELEASE} were not found at ${KERNEL_BUILD_DIR}."
+    echo "Trying to install matching headers package: linux-headers-${KERNEL_RELEASE}"
+    apt-get install -y "linux-headers-${KERNEL_RELEASE}"
+fi
+
+if [ ! -f "${KERNEL_BUILD_DIR}/Makefile" ]; then
+    echo "Error: kernel headers are still missing for ${KERNEL_RELEASE}."
+    echo "Install matching headers on the Pi, then rerun install.sh."
+    echo "Suggested command: sudo apt install linux-headers-${KERNEL_RELEASE}"
+    exit 1
+fi
+
 echo "[2/9] Building and installing out-of-tree fbtft"
 if [ -d "$FBTFT_DIR/.git" ]; then
     git -C "$FBTFT_DIR" pull --ff-only
@@ -124,8 +139,8 @@ else
     rm -rf "$FBTFT_DIR"
     git clone https://github.com/notro/fbtft.git "$FBTFT_DIR"
 fi
-make -C "/lib/modules/$(uname -r)/build" M="$FBTFT_DIR" modules
-make -C "/lib/modules/$(uname -r)/build" M="$FBTFT_DIR" modules_install
+make -C "${KERNEL_BUILD_DIR}" M="$FBTFT_DIR" modules
+make -C "${KERNEL_BUILD_DIR}" M="$FBTFT_DIR" modules_install
 
 echo "[3/9] Writing and compiling overlay"
 cat > "${OVERLAYS_DIR}/inland-ili9481-overlay.dts" <<EOF
