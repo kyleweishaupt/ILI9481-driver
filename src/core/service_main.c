@@ -2,9 +2,13 @@
 /*
  * service_main.c — Entry point for the ILI9481 userspace framebuffer daemon
  *
- * Initialises GPIO MMIO, opens the virtual framebuffer, starts the flush
+ * Initialises GPIO MMIO, opens the framebuffer, starts the flush
  * thread, and optionally the touch polling thread.  Handles SIGTERM/SIGINT
  * for clean shutdown.
+ *
+ * Diagnostic modes:
+ *   --test-pattern  Fill screen with solid R/G/B/W/K for 3 s each.
+ *   --gpio-probe    Toggle each GPIO pin one-by-one for multimeter probing.
  */
 
 #include <stdio.h>
@@ -106,6 +110,47 @@ static void run_benchmark(struct gpio_bus *bus, uint16_t w, uint16_t h)
     printf("Benchmark: %d frames in %.2f s = %.1f FPS\n", frames, elapsed, fps);
 
     free(dummy);
+}
+
+/* ------------------------------------------------------------------ */
+/* Test-pattern mode:  solid R / G / B / W / Blk, 3 seconds each     */
+/* ------------------------------------------------------------------ */
+
+static void run_test_pattern(struct gpio_bus *bus, uint16_t w, uint16_t h)
+{
+    uint32_t npixels = (uint32_t)w * h;
+    uint16_t *buf = malloc(npixels * sizeof(uint16_t));
+    if (!buf) {
+        log_error("Cannot allocate test-pattern buffer");
+        return;
+    }
+
+    /*  RGB565 values: R=0xF800, G=0x07E0, B=0x001F, W=0xFFFF, K=0x0000 */
+    static const struct { const char *name; uint16_t colour; } fills[] = {
+        { "RED",   0xF800 },
+        { "GREEN", 0x07E0 },
+        { "BLUE",  0x001F },
+        { "WHITE", 0xFFFF },
+        { "BLACK", 0x0000 },
+    };
+
+    printf("\n=== Test-Pattern Mode ===\n");
+    printf("The display should show solid colours, 3 seconds each.\n");
+    printf("If the screen stays white for every colour, the init sequence\n");
+    printf("is not reaching the controller (wrong pin map or wrong chip).\n\n");
+
+    for (int c = 0; c < 5; c++) {
+        printf("  %s ... ", fills[c].name);
+        fflush(stdout);
+        for (uint32_t i = 0; i < npixels; i++)
+            buf[i] = fills[c].colour;
+        ili9481_flush_full(bus, w, h, buf);
+        sleep(3);
+        printf("done\n");
+    }
+
+    printf("\nTest-pattern complete.\n");
+    free(buf);
 }
 
 /* ------------------------------------------------------------------ */
@@ -212,7 +257,21 @@ int main(int argc, char **argv)
         goto out;
     }
 
-    /* Open the virtual framebuffer */
+    /* GPIO probe mode: toggle pins one-by-one and exit */
+    if (cfg.gpio_probe) {
+        gpio_bus_probe(bus);
+        ret = EXIT_SUCCESS;
+        goto out;
+    }
+
+    /* Test-pattern mode: solid colour fills, then exit */
+    if (cfg.test_pattern) {
+        run_test_pattern(bus, disp_w, disp_h);
+        ret = EXIT_SUCCESS;
+        goto out;
+    }
+
+    /* Open the framebuffer */
     fb = fb_provider_init(cfg.fb_device, disp_w, disp_h);
     if (!fb) {
         log_error("Failed to initialise framebuffer — aborting");

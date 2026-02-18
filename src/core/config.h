@@ -20,6 +20,8 @@ struct ili9481_config {
     char        spi_device[64]; /* SPI device for touch         */
     uint32_t    spi_speed;      /* SPI clock in Hz              */
     int         benchmark;      /* 1 = benchmark mode           */
+    int         test_pattern;   /* 1 = solid colour test        */
+    int         gpio_probe;     /* 1 = toggle pins one by one   */
 };
 
 /*

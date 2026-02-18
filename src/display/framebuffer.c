@@ -3,11 +3,11 @@
  * framebuffer.c — Mirror an existing Linux framebuffer to the ILI9481 TFT
  *
  * Opens /dev/fb0 (or whichever device is configured), mmaps it read-only,
- * and each frame converts pixels to 12-bit RGB444 + nearest-neighbor
+ * and each frame converts pixels to 16-bit RGB565 + nearest-neighbor
  * scales to the TFT resolution before flushing to the display via GPIO.
  *
- * RGB444 packing: bits [11:8]=R, [7:4]=G, [3:0]=B.
- * Only DB0–DB11 are wired on 26-pin shields; DB12–DB15 are absent.
+ * RGB565 packing: bits [15:11]=R(5), [10:5]=G(6), [4:0]=B(5).
+ * Sent over the 8-bit bus as two bus cycles per pixel (high byte first).
  *
  * No kernel modules are loaded — works with the stock vc4drmfb framebuffer.
  */
@@ -52,7 +52,7 @@ struct fb_provider {
     uint32_t    blue_offset;
     uint32_t    blue_length;
 
-    /* Pre-allocated scale buffer (TFT-sized, RGB444 in uint16_t) */
+    /* Pre-allocated scale buffer (TFT-sized, RGB565 in uint16_t) */
     uint16_t   *scale_buf;
     uint32_t    tft_width;
     uint32_t    tft_height;
@@ -63,13 +63,13 @@ struct fb_provider {
 /* ------------------------------------------------------------------ */
 
 /*
- * Convert a 32-bit pixel to RGB444 using the source fb's bit-field layout.
+ * Convert a 32-bit pixel to RGB565 using the source fb's bit-field layout.
  * Handles XRGB8888, ARGB8888, BGRX8888, and any other layout described
  * by the fb_var_screeninfo red/green/blue offset/length fields.
  *
- * Result: bits [11:8]=R, [7:4]=G, [3:0]=B.
+ * Result: bits [15:11]=R(5), [10:5]=G(6), [4:0]=B(5).
  */
-static inline uint16_t pixel32_to_rgb444(uint32_t px,
+static inline uint16_t pixel32_to_rgb565(uint32_t px,
                                           uint32_t r_off, uint32_t r_len,
                                           uint32_t g_off, uint32_t g_len,
                                           uint32_t b_off, uint32_t b_len)
@@ -78,24 +78,12 @@ static inline uint16_t pixel32_to_rgb444(uint32_t px,
     uint32_t g = (px >> g_off) & ((1u << g_len) - 1);
     uint32_t b = (px >> b_off) & ((1u << b_len) - 1);
 
-    /* Normalise each channel to 4 bits */
-    if (r_len > 4) r >>= (r_len - 4); else if (r_len < 4) r <<= (4 - r_len);
-    if (g_len > 4) g >>= (g_len - 4); else if (g_len < 4) g <<= (4 - g_len);
-    if (b_len > 4) b >>= (b_len - 4); else if (b_len < 4) b <<= (4 - b_len);
+    /* Normalise each channel: R to 5 bits, G to 6 bits, B to 5 bits */
+    if (r_len > 5) r >>= (r_len - 5); else if (r_len < 5) r <<= (5 - r_len);
+    if (g_len > 6) g >>= (g_len - 6); else if (g_len < 6) g <<= (6 - g_len);
+    if (b_len > 5) b >>= (b_len - 5); else if (b_len < 5) b <<= (5 - b_len);
 
-    return (uint16_t)((r << 8) | (g << 4) | b);
-}
-
-/*
- * Convert a 16-bit RGB565 pixel to RGB444.
- */
-static inline uint16_t pixel565_to_rgb444(uint16_t px)
-{
-    uint32_t r5 = (px >> 11) & 0x1F;
-    uint32_t g6 = (px >> 5) & 0x3F;
-    uint32_t b5 = px & 0x1F;
-
-    return (uint16_t)(((r5 >> 1) << 8) | ((g6 >> 2) << 4) | (b5 >> 1));
+    return (uint16_t)((r << 11) | (g << 5) | b);
 }
 
 /* ------------------------------------------------------------------ */
@@ -112,20 +100,20 @@ static void scale_frame(struct fb_provider *fb)
     const uint8_t *src = fb->map;
 
     if (fb->src_bpp == 16) {
-        /* 16bpp RGB565 source → convert to RGB444 + optional scaling */
+        /* 16bpp source is already RGB565 — just scale (no conversion) */
         for (uint32_t dy = 0; dy < th; dy++) {
             uint32_t sy = dy * sh / th;
             const uint16_t *srow = (const uint16_t *)(src + sy * stride);
             uint16_t *drow = &fb->scale_buf[dy * tw];
             for (uint32_t dx = 0; dx < tw; dx++) {
                 uint32_t sx = dx * sw / tw;
-                drow[dx] = pixel565_to_rgb444(srow[sx]);
+                drow[dx] = srow[sx];
             }
         }
         return;
     }
 
-    /* 32bpp source: convert to RGB444 + scale in one pass */
+    /* 32bpp source: convert to RGB565 + scale in one pass */
     const uint32_t r_off = fb->red_offset;
     const uint32_t r_len = fb->red_length;
     const uint32_t g_off = fb->green_offset;
@@ -139,7 +127,7 @@ static void scale_frame(struct fb_provider *fb)
         uint16_t *drow = &fb->scale_buf[dy * tw];
         for (uint32_t dx = 0; dx < tw; dx++) {
             uint32_t sx = dx * sw / tw;
-            drow[dx] = pixel32_to_rgb444(srow[sx],
+            drow[dx] = pixel32_to_rgb565(srow[sx],
                                           r_off, r_len,
                                           g_off, g_len,
                                           b_off, b_len);
@@ -235,7 +223,7 @@ struct fb_provider *fb_provider_init(const char *fb_device,
     log_info("Source framebuffer %s: %ux%u %ubpp (stride=%u)",
              fb_device, fb->src_width, fb->src_height,
              fb->src_bpp, fb->src_stride);
-    log_info("TFT target: %ux%u RGB444 — scale+convert",
+    log_info("TFT target: %ux%u RGB565 — scale+convert",
              tft_width, tft_height);
 
     return fb;
@@ -253,7 +241,7 @@ void fb_flush_loop(struct fb_provider *fb, struct gpio_bus *bus,
     clock_gettime(CLOCK_MONOTONIC, &next_tick);
     fps_start = next_tick;
 
-    log_info("Flush loop starting: mirror %ux%u %ubpp → %ux%u RGB444 @ %d FPS",
+    log_info("Flush loop starting: mirror %ux%u %ubpp → %ux%u RGB565 @ %d FPS",
              fb->src_width, fb->src_height, fb->src_bpp,
              tft_width, tft_height, fps);
 
@@ -264,7 +252,7 @@ void fb_flush_loop(struct fb_provider *fb, struct gpio_bus *bus,
         /* Convert and scale the source framebuffer into the TFT buffer */
         scale_frame(fb);
 
-        /* Flush the scaled RGB444 buffer to the display */
+        /* Flush the scaled RGB565 buffer to the display */
         ili9481_flush_full(bus, tft_width, tft_height, fb->scale_buf);
 
         frame_count++;

@@ -51,8 +51,8 @@ static const struct ili9481_reg_cmd ili9481_init_cmds[] = {
     { ILI9481_GAMMASET, 12, { 0x00, 0x32, 0x36, 0x45, 0x06, 0x16,
                                0x37, 0x75, 0x77, 0x54, 0x0C, 0x00 }, 0 },
 
-    /* Pixel format — 12-bit RGB444 (only DB0–DB11 are wired) */
-    { ILI9481_COLMOD,   1, { ILI9481_COLMOD_12BIT }, 0 },
+    /* Pixel format — RGB565 (2 bytes/pixel over 8-bit bus) */
+    { ILI9481_COLMOD,   1, { ILI9481_COLMOD_16BIT }, 0 },
 
     /* Display on */
     { ILI9481_DISPON,   0, {0}, 25 },

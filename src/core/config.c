@@ -25,6 +25,8 @@ void config_defaults(struct ili9481_config *cfg)
     strncpy(cfg->spi_device, "/dev/spidev0.1", sizeof(cfg->spi_device) - 1);
     cfg->spi_speed    = 2000000;
     cfg->benchmark    = 0;
+    cfg->test_pattern = 0;
+    cfg->gpio_probe   = 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -132,6 +134,10 @@ int config_parse_args(struct ili9481_config *cfg, int argc, char **argv)
             cfg->enable_touch = 0;
         } else if (strcmp(argv[i], "--benchmark") == 0) {
             cfg->benchmark = 1;
+        } else if (strcmp(argv[i], "--test-pattern") == 0) {
+            cfg->test_pattern = 1;
+        } else if (strcmp(argv[i], "--gpio-probe") == 0) {
+            cfg->gpio_probe = 1;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             printf("Usage: ili9481-fb [OPTIONS]\n"
                    "  --config=PATH    Config file path\n"
@@ -141,6 +147,8 @@ int config_parse_args(struct ili9481_config *cfg, int argc, char **argv)
                    "  --touch          Enable touch support\n"
                    "  --no-touch       Disable touch support (default)\n"
                    "  --benchmark      Run FPS benchmark and exit\n"
+                   "  --test-pattern   Show solid colour test bars and exit\n"
+                   "  --gpio-probe     Toggle each GPIO pin one by one (diagnostic)\n"
                    "  -h, --help       Show this help\n");
             exit(0);
         } else {

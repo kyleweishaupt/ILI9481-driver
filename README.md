@@ -2,12 +2,13 @@
 
 Userspace translation daemon for the **Inland 3.5" TFT Touch Shield** (and
 compatible Kuman / MCUfriend / Banggood / Sainsmart 3.5" boards) that use an
-**ILI9481** controller on a **12-bit 8080-parallel GPIO bus** through the
+**ILI9481** controller on an **8-bit 8080-I parallel GPIO bus** through the
 original **26-pin** Raspberry Pi header.
 
 The daemon mirrors the HDMI framebuffer (`/dev/fb0`) to the TFT panel by
-reading pixels, converting them to **RGB444**, and bit-banging them out over
-GPIO using direct MMIO register writes.
+reading pixels, converting them to **RGB565**, and bit-banging them out over
+GPIO using direct MMIO register writes. Each 16-bit pixel is sent as two
+8-bit bus cycles (high byte first).
 
 ---
 
@@ -34,43 +35,47 @@ These boards **all** use:
 - XPT2046 / ADS7846 SPI resistive touch (some variants)
 - **26-pin header only** — they do NOT use pins 27–40
 
-### 26-pin = 12 data bits, not 16
+### 26-pin = 8-bit bus mode
 
-Because the shield only occupies **pins 1–26** of the Pi header, it can
-physically wire only **12 data lines** (DB0–DB11). Pins for DB12–DB15 would
-require the extended 40-pin header and are **not connected**.
+Because the shield only occupies **pins 1–26** of the Pi header, it has
+only **17 usable GPIOs**. With 5 control signals (RST, CS, DC, WR, RD) that
+leaves only 12 data lines at most. But crucially, the ILI9481 controller
+hardware only supports **8-bit or 16-bit** parallel bus widths — there is
+no 12-bit bus mode. The IM strapping pins on the PCB are wired for
+**8-bit 8080-I mode**, using DB0–DB7 only.
 
 This means:
 
-- The ILI9481 must be operated in **RGB444** mode (COLMOD = 0x03), not RGB565
-- Each pixel is 12 bits: **R[3:0] G[3:0] B[3:0]**
-- Any driver assuming 16-bit RGB565 will produce a **white screen** because
-  the top 4 data bits float high
+- The ILI9481 is operated in **RGB565** mode (COLMOD = 0x55) with 65,536 colours
+- Each pixel is **16 bits** (R5 G6 B5), sent as **two 8-bit bus cycles**
+- Only **13 GPIOs** are needed: 8 data (DB0–DB7) + 5 control
+- GPIO 14, 15, 2, 7 are **free** for UART, I²C, or SPI touch
 
-> **This is exactly why Waveshare pin maps, LCD-show scripts, old FBTFT
-> overlays, and all 16-bit drivers fail on this board.**
+> **This is why all 16-bit drivers (Waveshare, LCD-show, old FBTFT overlays)
+> fail on this board — they assume 16 data lines which aren't available on
+> the 26-pin header.**
 
 ### Board components
 
 | Component          | Detail                                              |
 | ------------------ | --------------------------------------------------- |
 | **Display panel**  | 3.5" 320×480 TFT, ILI9481 controller                |
-| **Color depth**    | RGB444 (12 bits/pixel) — limited by 12 wired lines  |
-| **Interface**      | 12-bit 8080-style parallel bus (DB0–DB11)           |
+| **Color depth**    | RGB565 (65,536 colours) via 8-bit bus mode          |
+| **Interface**      | 8-bit 8080-I parallel bus (DB0–DB7)                 |
 | **Level shifting** | U1–U4: 74HC245 / 74HCT245 bus transceivers          |
 | **Touch**          | U5: XPT2046 / ADS7846 (shared SPI pins, unreliable) |
 | **Backlight**      | Always-on 3.3 V, no PWM control                     |
 
 ### 8080 parallel bus signals
 
-| Signal   | Function                                               |
-| -------- | ------------------------------------------------------ |
-| DB0–DB11 | 12-bit pixel data bus                                  |
-| WR       | Write strobe (active-low; data latches on rising edge) |
-| RS / DC  | Register select: LOW = command, HIGH = pixel data      |
-| RST      | Hardware reset (active-low)                            |
-| CS       | Chip select (active-low)                               |
-| RD       | Read strobe — unused, held HIGH                        |
+| Signal  | Function                                               |
+| ------- | ------------------------------------------------------ |
+| DB0–DB7 | 8-bit pixel data bus                                   |
+| WR      | Write strobe (active-low; data latches on rising edge) |
+| RS / DC | Register select: LOW = command, HIGH = pixel data      |
+| RST     | Hardware reset (active-low)                            |
+| CS      | Chip select (active-low)                               |
+| RD      | Read strobe — unused, held HIGH                        |
 
 ---
 
@@ -100,9 +105,9 @@ entirely. It avoids all kernel hooks and is maintainable across future kernels:
 | ----------------- | ----------------------------------------------- |
 | GPIO access       | MMIO via `/dev/gpiomem` (BCM283x registers)     |
 | Pixel source      | Mirrors `/dev/fb0` (HDMI via vc4drmfb)          |
-| Pixel format      | Converts 32bpp XRGB8888 → 12bpp RGB444          |
+| Pixel format      | Converts 32bpp XRGB8888 → 16bpp RGB565          |
 | Scaling           | Nearest-neighbor from HDMI resolution → 480×320 |
-| Bus interface     | 12-bit 8080 parallel with precomputed LUTs      |
+| Bus interface     | 8-bit 8080-I parallel with precomputed LUT      |
 | Service lifecycle | systemd unit, auto-start on boot                |
 
 ### How it works
@@ -110,10 +115,10 @@ entirely. It avoids all kernel hooks and is maintainable across future kernels:
 1. The daemon opens `/dev/fb0` (HDMI framebuffer) and mmaps it read-only.
 2. GPIO pins are configured as outputs via MMIO writes to `/dev/gpiomem`.
 3. The ILI9481 is hardware-reset and sent its full initialization sequence
-   with COLMOD = 0x03 (RGB444 mode).
+   with COLMOD = 0x55 (RGB565 mode, 2 bytes per pixel over 8-bit bus).
 4. Every frame interval (1000/fps ms):
    - Read the HDMI framebuffer
-   - Convert 32bpp XRGB8888 → 12bpp RGB444
+   - Convert 32bpp XRGB8888 → 16bpp RGB565
    - Nearest-neighbor scale to 480×320 (or 320×480 depending on rotation)
    - Set CASET/PASET/RAMWR window
    - Stream all 153,600 pixels via GPIO bit-banging
@@ -121,14 +126,13 @@ entirely. It avoids all kernel hooks and is maintainable across future kernels:
 
 ### Pixel write path
 
-Each 12-bit pixel write:
+Each RGB565 pixel requires two 8-bit bus writes:
 
-1. Look up SET/CLR masks from precomputed LUTs (256-entry for DB0–DB7,
-   16-entry for DB8–DB11)
-2. Write GPSET0/GPCLR0 to place the 12-bit value on the data bus
-3. Assert WR low (GPCLR)
-4. DMB barrier (≥ 15 ns hold time)
-5. Release WR high — rising edge latches the pixel into the ILI9481
+1. Look up SET/CLR masks from a precomputed 256-entry LUT for DB0–DB7
+2. Write GPSET0/GPCLR0 to place the **high byte** (R[4:0] G[5:3]) on DB0–DB7
+3. Assert WR low (GPCLR0), DMB barrier (≥ 15 ns), release WR high (GPSET0)
+4. Write GPSET0/GPCLR0 to place the **low byte** (G[2:0] B[4:0]) on DB0–DB7
+5. Assert WR low, DMB, release WR high — rising edge latches the pixel
 
 ### ILI9481 initialization sequence
 
@@ -141,7 +145,7 @@ On startup the daemon:
    - Power Control (0xD0, 0xD1, 0xD2)
    - Panel Drive (0xC0), Frame Rate (0xC5)
    - Gamma (0xC8, 12 bytes)
-   - **Pixel Format (0x3A, 0x03 = RGB444)**
+   - **Pixel Format (0x3A, 0x55 = RGB565)**
    - Display On (0x29)
 3. Writes MADCTL (0x36) for the selected rotation
 
@@ -149,8 +153,8 @@ On startup the daemon:
 
 ## Target Hardware
 
-- **Display:** 320×480 TFT, ILI9481 controller, RGB444
-- **Interface:** 12-bit 8080 parallel over 26-pin GPIO header
+- **Display:** 320×480 TFT, ILI9481 controller, RGB565 (8-bit bus)
+- **Interface:** 8-bit 8080-I parallel over 26-pin GPIO header
 - **Level shifting:** 74HC245 / 74HCT245 bus transceivers (3.3 V → 5 V)
 - **Touch (optional):** XPT2046 / ADS7846 over SPI (unreliable, shared pins)
 - **Boards:** Raspberry Pi 1/2/3/4/Zero/Zero 2 W — **NOT Pi 5**
@@ -229,7 +233,7 @@ The mapping matches the standard Inland / Kuman / MCUfriend wiring for
 | WR     | 23         | 16     | Output    | Active-low  |
 | RD     | 18         | 12     | Output    | Held HIGH   |
 
-### Data bus — Lower byte (DB0–DB7)
+### Data bus (DB0–DB7)
 
 | Signal | GPIO (BCM) | Pi Pin |
 | ------ | ---------- | ------ |
@@ -242,27 +246,52 @@ The mapping matches the standard Inland / Kuman / MCUfriend wiring for
 | DB6    | 4          | 7      |
 | DB7    | 3          | 5      |
 
-### Data bus — Upper nibble (DB8–DB11)
+### Free GPIOs (not used in 8-bit mode)
 
-| Signal | GPIO (BCM) | Pi Pin |
-| ------ | ---------- | ------ |
-| DB8    | 14         | 8      |
-| DB9    | 15         | 10     |
-| DB10   | 2          | 3      |
-| DB11   | 7          | 26     |
-
-### Not connected (absent on 26-pin header)
-
-| Signal | Would need | Note                                      |
-| ------ | ---------- | ----------------------------------------- |
-| DB12   | Pin 32     | GPIO 12 — not available on 26-pin shields |
-| DB13   | Pin 33     | GPIO 13 — not available                   |
-| DB14   | Pin 35     | GPIO 19 — not available                   |
-| DB15   | Pin 36     | GPIO 16 — not available                   |
+| GPIO (BCM) | Pi Pin | Alt function |
+| ---------- | ------ | ------------ |
+| 14         | 8      | UART TX      |
+| 15         | 10     | UART RX      |
+| 2          | 3      | I²C SDA      |
+| 7          | 26     | SPI CE1      |
 
 > **Important:** Waveshare, LCD-show, and FBTFT flexfb pin maps **do not apply**
 > to this board. Those projects target 40-pin boards with 8-bit or 16-bit SPI/
 > parallel interfaces.
+
+---
+
+## Diagnostics
+
+If the screen stays white (or shows garbled output), use these tools:
+
+### Test pattern
+
+Fills the screen with solid red, green, blue, white, and black (3 seconds
+each). If **any** colour appears, the GPIO pin map and init sequence are
+correct.
+
+```bash
+sudo ili9481-fb --test-pattern
+```
+
+### GPIO probe
+
+Toggles each configured GPIO pin HIGH for 3 seconds, printing the pin name.
+Use a multimeter to verify which physical header pin each GPIO maps to.
+
+```bash
+sudo ili9481-fb --gpio-probe
+```
+
+### Diagnostic script
+
+Runs a comprehensive system check (daemon status, GPIO access, fb0, service
+log, pin state snapshot, etc.):
+
+```bash
+sudo ./scripts/tft-diagnose.sh
+```
 
 ---
 
@@ -286,7 +315,7 @@ include/
   ili9481_hw.h                  # Register defines, pin constants, MADCTL values
 src/
   bus/
-    gpio_mmio.c / .h            # MMIO GPIO bus — LUTs, 12-bit writes
+    gpio_mmio.c / .h            # MMIO GPIO bus — LUT, 8-bit writes
     timing.h                    # DMB barrier, busy-wait ndelay
   display/
     ili9481.c / .h              # Init sequence, CASET/PASET/RAMWR flush
@@ -317,7 +346,8 @@ Makefile                        # Build system
 | WR pulse low (tWRL)     | ≥ 15 ns                       |
 | WR pulse high (tWRH)    | ≥ 15 ns                       |
 | Pixels per frame        | 153,600 (480 × 320)           |
-| Bits per pixel          | 12 (RGB444)                   |
+| Bits per pixel          | 16 (RGB565, sent as 2×8 bits) |
+| Bus cycles per frame    | 307,200 (2 per pixel)         |
 | Target throughput       | 25–30 FPS                     |
 | Effective FPS (typical) | 5–15 FPS (GPIO MMIO overhead) |
 
@@ -330,9 +360,10 @@ and is well-suited for consoles, static UIs, and lightweight desktops.
 ## Limitations
 
 - Refresh rate is constrained by GPIO MMIO overhead (~5–15 FPS depending on Pi
-  model).
+  model). 8-bit mode requires 2 bus cycles per pixel (307,200 /WR pulses per
+  frame), which is slower than 16-bit mode but the only option on 26-pin boards.
 - Not suitable for video playback or fast animation.
-- Only 12 bits per pixel (4096 colours) — limited by the 26-pin header wiring.
+- 65,536 colours (RGB565).
 - Touch is unreliable on boards where SPI shares pins with the data bus.
 - Pi 5 is **not supported** (RP1 has a different GPIO register layout).
 - For new projects, SPI-based ILI9341/ILI9488 or DSI panels offer better

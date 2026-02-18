@@ -4,7 +4,7 @@
  *
  * Opens an existing Linux framebuffer device (e.g. /dev/fb0), mmaps it,
  * and provides a flush loop that reads pixels, converts/scales them to
- * the TFT resolution (480×320 RGB444), and pushes them to the display.
+ * the TFT resolution (480×320 RGB565), and pushes them to the display.
  *
  * No kernel modules are loaded — the daemon mirrors whatever fb device
  * already exists (typically vc4drmfb on HDMI).
@@ -40,8 +40,8 @@ struct fb_provider *fb_provider_init(const char *fb_device,
  * fb_flush_loop() — Run the mirror-to-display loop.
  *
  * Each frame: reads from the mmap'd source fb, converts pixel format
- * (32bpp XRGB8888 → 12bpp RGB444 if needed), scales to tft_width ×
- * tft_height via nearest-neighbor, and calls ili9481_flush_full().
+ * (32bpp XRGB8888 → RGB565 if needed), scales to tft_width × tft_height
+ * via nearest-neighbor, and calls ili9481_flush_full().
  *
  * Uses clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME) for timing.
  * Runs until `*running` becomes 0.  Logs actual FPS every 10 seconds.

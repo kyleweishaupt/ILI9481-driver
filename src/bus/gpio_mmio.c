@@ -1,16 +1,16 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * gpio_mmio.c — MMIO GPIO bus driver for ILI9481 12-bit parallel interface
+ * gpio_mmio.c — MMIO GPIO bus driver for ILI9481, 8-bit 8080-I mode
  *
  * Writes directly to BCM283x GPIO registers via /dev/gpiomem.
- * Uses precomputed lookup tables for fast pixel writes.
+ * Uses a precomputed 256-entry lookup table for fast data bus writes.
  *
- * Data bus: DB0–DB11 (12 lines).  DB12–DB15 are NOT connected on
- * 26-pin Inland / Kuman / MCUfriend shields.  Pixels are written
- * as 12-bit RGB444 values: DB[11:8]=R, DB[7:4]=G, DB[3:0]=B.
+ * Data bus:    DB0–DB7 (8 lines)
+ * Control:     RST, CS, DC, WR, RD (5 lines)
+ * Total:       13 GPIOs on pins 1–26
  *
- * Control pins: RST, CS, DC, WR, RD (5 pins).
- * Total GPIO usage: 17 pins (12 data + 5 control).
+ * Pixels are RGB565 (16-bit), sent as TWO 8-bit bus cycles per pixel
+ * (high byte first, then low byte).
  *
  * Pi 5 (RP1 chip) is NOT supported — detected and rejected at open time.
  */
@@ -42,16 +42,13 @@ struct gpio_bus {
     uint32_t           cs_mask;     /* 1 << GPIO_CS                     */
     uint32_t           rd_mask;     /* 1 << GPIO_RD                     */
 
-    /* Lookup tables for fast data bus writes */
-    uint32_t lut_lo_set[256];       /* DB0–DB7:  byte → bits to SET     */
-    uint32_t lut_lo_clr[256];       /* DB0–DB7:  byte → bits to CLR     */
-    uint32_t lut_hi_set[16];        /* DB8–DB11: nibble → bits to SET   */
-    uint32_t lut_hi_clr[16];        /* DB8–DB11: nibble → bits to CLR   */
+    /* Lookup table: 256-entry byte → GPSET0/GPCLR0 bit masks for DB0–DB7 */
+    uint32_t lut_set[256];
+    uint32_t lut_clr[256];
 };
 
-/* Pin arrays */
-static const int db_lo_pins[8] = DATA_BUS_LO_PINS;
-static const int db_hi_pins[4] = DATA_BUS_HI_PINS;
+/* Pin array for DB0–DB7 (BCM numbers, ordered by bit position) */
+static const int db_pins[8] = DATA_BUS_PINS;
 
 /* ------------------------------------------------------------------ */
 /* Pi model detection                                                 */
@@ -138,64 +135,41 @@ static void gpio_set_output(volatile uint32_t *regs, int pin)
 
 static void gpio_build_luts(struct gpio_bus *bus)
 {
-    /* Low byte LUT: DB0–DB7 (256 entries, one per byte value) */
+    /* 256-entry LUT: for each byte value, precompute which GPIO bits to
+       SET and which to CLR so we can slam DB0–DB7 in one register write. */
     for (int val = 0; val < 256; val++) {
         uint32_t set = 0, clr = 0;
         for (int bit = 0; bit < 8; bit++) {
             if (val & (1 << bit))
-                set |= (1u << db_lo_pins[bit]);
+                set |= (1u << db_pins[bit]);
             else
-                clr |= (1u << db_lo_pins[bit]);
+                clr |= (1u << db_pins[bit]);
         }
-        bus->lut_lo_set[val] = set;
-        bus->lut_lo_clr[val] = clr;
-    }
-
-    /* High nibble LUT: DB8–DB11 (16 entries, one per nibble value) */
-    for (int val = 0; val < 16; val++) {
-        uint32_t set = 0, clr = 0;
-        for (int bit = 0; bit < 4; bit++) {
-            if (val & (1 << bit))
-                set |= (1u << db_hi_pins[bit]);
-            else
-                clr |= (1u << db_hi_pins[bit]);
-        }
-        bus->lut_hi_set[val] = set;
-        bus->lut_hi_clr[val] = clr;
+        bus->lut_set[val] = set;
+        bus->lut_clr[val] = clr;
     }
 }
 
 /* ------------------------------------------------------------------ */
-/* Core 12-bit bus write (hot path)                                   */
+/* Core 8-bit bus write (hot path)                                    */
 /* ------------------------------------------------------------------ */
 
 /*
- * Write a 12-bit value onto the data bus (DB0–DB11) and pulse /WR.
+ * Write an 8-bit value onto the data bus (DB0–DB7) and pulse /WR.
  *
- *   val bits [7:0]   → DB0–DB7   (low byte, via 256-entry LUT)
- *   val bits [11:8]  → DB8–DB11  (high nibble, via 16-entry LUT)
- *
- * 8080-style timing:
- *   1. Place data on bus (SET/CLR in one shot via LUTs)
- *   2. Assert /WR low  (active-low: CLR the WR pin)
- *   3. DMB barrier (≥ 15 ns)
- *   4. Release /WR high (SET the WR pin — rising edge latches data)
+ * 8080-I timing:
+ *   1.  Place data on bus (SET/CLR in one shot via LUT)
+ *   2.  Assert /WR low  (active-low: CLR the WR pin)
+ *   3.  DMB barrier (≥ 15 ns on BCM283x)
+ *   4.  Release /WR high (rising edge latches data into controller)
  */
 static inline void __attribute__((optimize("O3")))
-bus_write12(struct gpio_bus *bus, uint16_t val)
+bus_write8(struct gpio_bus *bus, uint8_t val)
 {
-    uint8_t lo = val & 0xFF;
-    uint8_t hi = (val >> 8) & 0x0F;
-
-    /* Set data bus: combine low-byte and high-nibble masks */
-    bus->regs[GPSET0] = bus->lut_lo_set[lo] | bus->lut_hi_set[hi];
-    bus->regs[GPCLR0] = bus->lut_lo_clr[lo] | bus->lut_hi_clr[hi];
-
-    /* Assert /WR low (active-low → clear the pin) */
+    bus->regs[GPSET0] = bus->lut_set[val];
+    bus->regs[GPCLR0] = bus->lut_clr[val];
     bus->regs[GPCLR0] = bus->wr_mask;
     dmb();
-
-    /* Release /WR high (rising edge latches data into ILI9481) */
     bus->regs[GPSET0] = bus->wr_mask;
 }
 
@@ -243,11 +217,9 @@ struct gpio_bus *gpio_bus_open(void)
     gpio_set_output(bus->regs, GPIO_WR);
     gpio_set_output(bus->regs, GPIO_RD);
 
-    /* Set all data pins to output */
+    /* Set all data pins to output (DB0–DB7 only, 8-bit mode) */
     for (int i = 0; i < 8; i++)
-        gpio_set_output(bus->regs, db_lo_pins[i]);
-    for (int i = 0; i < 4; i++)
-        gpio_set_output(bus->regs, db_hi_pins[i]);
+        gpio_set_output(bus->regs, db_pins[i]);
 
     /* Idle state:
      *   WR  = HIGH (deasserted, active-low)
@@ -261,7 +233,7 @@ struct gpio_bus *gpio_bus_open(void)
     /* Build LUTs */
     gpio_build_luts(bus);
 
-    log_info("GPIO MMIO bus opened (12-bit data + 5 control = 17 pins configured)");
+    log_info("GPIO MMIO bus opened (8-bit data + 5 control = 13 pins configured)");
     return bus;
 }
 
@@ -303,7 +275,7 @@ void gpio_write_cmd(struct gpio_bus *bus, uint8_t cmd)
     bus->regs[GPCLR0] = bus->dc_mask;
     dmb();
 
-    bus_write12(bus, (uint16_t)cmd);
+    bus_write8(bus, cmd);
 
     /* DC high = data mode */
     bus->regs[GPSET0] = bus->dc_mask;
@@ -313,13 +285,74 @@ void gpio_write_cmd(struct gpio_bus *bus, uint8_t cmd)
 void gpio_write_data(struct gpio_bus *bus, uint8_t data)
 {
     /* DC stays high (data mode) */
-    bus_write12(bus, (uint16_t)data);
+    bus_write8(bus, data);
 }
 
 void __attribute__((optimize("O3")))
 gpio_write_pixels(struct gpio_bus *bus, const uint16_t *pixels, uint32_t count)
 {
-    /* DC stays high (data mode) — stream pixels as fast as possible */
-    for (uint32_t i = 0; i < count; i++)
-        bus_write12(bus, pixels[i]);
+    /*
+     * 8-bit bus / RGB565: each 16-bit pixel requires TWO bus cycles.
+     * High byte first (R[4:0] G[5:3]), then low byte (G[2:0] B[4:0]).
+     * DC stays high throughout (data mode).
+     */
+    for (uint32_t i = 0; i < count; i++) {
+        uint16_t px = pixels[i];
+        bus_write8(bus, (uint8_t)(px >> 8));
+        bus_write8(bus, (uint8_t)(px & 0xFF));
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Diagnostic: toggle each GPIO pin one-by-one for multimeter probing */
+/* ------------------------------------------------------------------ */
+
+void gpio_bus_probe(struct gpio_bus *bus)
+{
+    if (!bus) return;
+
+    /* Deassert everything first */
+    bus->regs[GPSET0] = bus->wr_mask | bus->dc_mask | bus->rd_mask | bus->cs_mask;
+    for (int i = 0; i < 8; i++)
+        bus->regs[GPCLR0] = 1u << db_pins[i];
+
+    static const struct { const char *name; int gpio; } ctrl_pins[] = {
+        { "RST",  GPIO_RST },
+        { "CS",   GPIO_CS  },
+        { "DC",   GPIO_DC  },
+        { "WR",   GPIO_WR  },
+        { "RD",   GPIO_RD  },
+    };
+
+    printf("\n=== GPIO Probe Mode ===\n");
+    printf("Each pin will be driven HIGH for 3 seconds, then LOW.\n");
+    printf("Use a multimeter to verify which physical pin it maps to.\n\n");
+
+    for (int i = 0; i < 5; i++) {
+        uint32_t mask = 1u << ctrl_pins[i].gpio;
+        printf("  [CTRL] %-4s  (GPIO %2d)  → HIGH ... ",
+               ctrl_pins[i].name, ctrl_pins[i].gpio);
+        fflush(stdout);
+        bus->regs[GPSET0] = mask;
+        sleep(3);
+        bus->regs[GPCLR0] = mask;
+        printf("LOW\n");
+    }
+
+    for (int i = 0; i < 8; i++) {
+        uint32_t mask = 1u << db_pins[i];
+        printf("  [DATA] DB%-2d (GPIO %2d)  → HIGH ... ",
+               i, db_pins[i]);
+        fflush(stdout);
+        bus->regs[GPSET0] = mask;
+        sleep(3);
+        bus->regs[GPCLR0] = mask;
+        printf("LOW\n");
+    }
+
+    printf("\nProbe complete.  Restoring idle state.\n");
+
+    /* Restore idle: WR/DC/RD high, CS low */
+    bus->regs[GPSET0] = bus->wr_mask | bus->dc_mask | bus->rd_mask;
+    bus->regs[GPCLR0] = bus->cs_mask;
 }
