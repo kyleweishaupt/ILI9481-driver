@@ -55,7 +55,7 @@ fi
 echo
 
 echo "[2] Loaded modules"
-for module in fbtft fb_ili9481 fbtft_device; do
+for module in fbtft fb_ili9481; do
     if lsmod | awk '{print $1}' | grep -qx "$module"; then
         pass "Loaded: $module"
     else
@@ -87,7 +87,7 @@ runtime_overlay=0
 if [ -d /proc/device-tree/chosen/overlays ]; then
     while IFS= read -r -d '' name_file; do
         name=$(tr -d '\000' < "$name_file" 2>/dev/null || true)
-        if [ "$name" = "inland-ili9481-overlay" ]; then
+        if echo "$name" | grep -qi 'inland-ili9481'; then
             runtime_overlay=1
             break
         fi

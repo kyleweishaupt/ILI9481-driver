@@ -96,6 +96,8 @@ remove_lines() {
 patch_fbtft_for_modern_kernel() {
     local core="$FBTFT_DIR/fbtft-core.c"
     local header="$FBTFT_DIR/fbtft.h"
+    local io="$FBTFT_DIR/fbtft-io.c"
+    local makefile="$FBTFT_DIR/Makefile"
 
     [ -f "$core" ] || return 0
     [ -f "$header" ] || return 0
@@ -109,19 +111,38 @@ patch_fbtft_for_modern_kernel() {
 
     sed -i 's/struct timespec update_time;/struct timespec64 update_time;/' "$header"
 
-    sed -i 's/enum of_gpio_flags of_flags;/unsigned long of_flags = 0;/' "$core"
+    sed -i '/unsigned long of_flags = 0;/d' "$core"
+    sed -i '/enum of_gpio_flags of_flags;/d' "$core"
     sed -i 's/of_get_named_gpio_flags(node, name, index, &of_flags)/of_get_named_gpio(node, name, index)/' "$core"
     sed -i 's/(of_flags & OF_GPIO_ACTIVE_LOW) ? GPIOF_OUT_INIT_LOW : GPIOF_OUT_INIT_HIGH/GPIOF_OUT_INIT_HIGH/' "$core"
+    sed -i 's/^\([[:space:]]*flags[[:space:]]*=\).*/\1 GPIOF_OUT_INIT_HIGH;/' "$core"
+    sed -i '/^[[:space:]]*GPIOF_OUT_INIT_HIGH;[[:space:]]*$/d' "$core"
 
     sed -i 's/getnstimeofday/ktime_get_ts64/g' "$core"
     sed -i 's/timespec_sub/timespec64_sub/g' "$core"
     sed -i 's/struct timespec /struct timespec64 /g' "$core"
 
-    sed -i 's/FBINFO_FLAG_DEFAULT/FBINFO_DEFAULT/g' "$core"
+    sed -i 's/FBINFO_FLAG_DEFAULT | FBINFO_VIRTFB/FBINFO_VIRTFB/g' "$core"
+    sed -i 's/FBINFO_DEFAULT | FBINFO_VIRTFB/FBINFO_VIRTFB/g' "$core"
+    sed -i 's/FBINFO_FLAG_DEFAULT/0/g' "$core"
+    sed -i 's/FBINFO_DEFAULT/0/g' "$core"
     sed -i 's/spi->master->bus_num/spi->controller->bus_num/g' "$core"
     sed -i 's/par->spi->master->setup(par->spi)/spi_setup(par->spi)/g' "$core"
 
     sed -i 's/ret = unregister_framebuffer(fb_info);/unregister_framebuffer(fb_info);\n\tret = 0;/' "$core"
+
+    if [ -f "$io" ]; then
+        sed -i '/m\.is_dma_mapped[[:space:]]*=[[:space:]]*1;/d' "$io"
+    fi
+
+    sed -i 's/\.remove = fbtft_driver_remove_spi,/\.remove = (void (*)(struct spi_device *))fbtft_driver_remove_spi,/' "$header"
+    sed -i 's/\.remove = fbtft_driver_remove_pdev,/\.remove = (void (*)(struct platform_device *))fbtft_driver_remove_pdev,/' "$header"
+
+    cat > "$makefile" <<'EOF'
+obj-m := fbtft.o fb_ili9481.o
+
+fbtft-objs := fbtft-core.o fbtft-sysfs.o fbtft-bus.o fbtft-io.o
+EOF
 }
 
 echo "Inland TFT35 ILI9481 installer"
@@ -165,6 +186,8 @@ fi
 
 echo "[2/9] Building and installing out-of-tree fbtft"
 if [ -d "$FBTFT_DIR/.git" ]; then
+    git -C "$FBTFT_DIR" reset --hard HEAD
+    git -C "$FBTFT_DIR" clean -fd
     git -C "$FBTFT_DIR" pull --ff-only
 else
     rm -rf "$FBTFT_DIR"
@@ -228,7 +251,6 @@ echo "[4/9] Updating module dependencies and load hints"
 depmod -a
 cat > /etc/modules-load.d/inland-tft35.conf <<'EOF'
 fbtft
-fbtft_device
 fb_ili9481
 EOF
 if [ "$TOUCH" -eq 1 ]; then
@@ -239,6 +261,7 @@ echo "[5/9] Cleaning old config entries"
 remove_lines "$CONFIG" \
     '/^# Inland TFT35 SPI display/d' \
     '/^# Inland TFT35 ILI9481 display/d' \
+    '/^# BEGIN inland-tft35$/,/^# END inland-tft35$/d' \
     '/^dtoverlay=piscreen/d' \
     '/^dtoverlay=waveshare35a/d' \
     '/^dtoverlay=ili9481/d' \
@@ -250,13 +273,27 @@ echo "[6/9] Configuring boot display and touch"
 sed -i 's/^dtoverlay=vc4-kms-v3d/#dtoverlay=vc4-kms-v3d/' "$CONFIG"
 sed -i 's/^dtoverlay=vc4-fkms-v3d/#dtoverlay=vc4-fkms-v3d/' "$CONFIG"
 sed -i 's/^display_auto_detect=1/#display_auto_detect=1/' "$CONFIG"
-ensure_line "$CONFIG" "dtparam=spi=on"
-ensure_line "$CONFIG" "disable_fw_kms_setup=1"
-ensure_line "$CONFIG" "# Inland TFT35 ILI9481 display"
-ensure_line "$CONFIG" "dtoverlay=inland-ili9481-overlay"
-if [ "$TOUCH" -eq 1 ]; then
-    ensure_line "$CONFIG" "dtoverlay=ads7846,cs=1,speed=2000000,penirq=${TOUCH_IRQ},penirq_pull=2,xohms=${TOUCH_XOHMS},pmax=${TOUCH_PMAX}"
+
+if ! grep -q '^\[all\]$' "$CONFIG"; then
+    echo "" >> "$CONFIG"
+    echo "[all]" >> "$CONFIG"
 fi
+
+cat >> "$CONFIG" <<'EOF'
+
+# BEGIN inland-tft35
+dtparam=spi=on
+disable_fw_kms_setup=1
+dtoverlay=inland-ili9481-overlay
+EOF
+
+if [ "$TOUCH" -eq 1 ]; then
+    echo "dtoverlay=ads7846,cs=1,speed=2000000,penirq=${TOUCH_IRQ},penirq_pull=2,xohms=${TOUCH_XOHMS},pmax=${TOUCH_PMAX}" >> "$CONFIG"
+fi
+
+cat >> "$CONFIG" <<'EOF'
+# END inland-tft35
+EOF
 
 echo "[7/9] Configuring fbcon mapping"
 sed -i 's/ fbcon=map:[^ ]*//g' "$CMDLINE"

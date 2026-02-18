@@ -28,7 +28,7 @@ found_overlay=0
 if [ -d /proc/device-tree/chosen/overlays ]; then
     while IFS= read -r -d '' name_file; do
         ov_name=$(tr -d '\000' < "$name_file" 2>/dev/null || true)
-        if [ "$ov_name" = "inland-ili9481-overlay" ]; then
+        if echo "$ov_name" | grep -qi 'inland-ili9481'; then
             found_overlay=1
             break
         fi
@@ -42,7 +42,7 @@ fi
 echo
 
 echo "[2] Module state"
-for module in fbtft fbtft_device fb_ili9481; do
+for module in fbtft fb_ili9481; do
     if lsmod | awk '{print $1}' | grep -qx "$module"; then
         pass "Loaded module: $module"
     else

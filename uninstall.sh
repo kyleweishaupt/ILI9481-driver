@@ -41,6 +41,7 @@ echo "[3/6] Removing module autoload hints"
 rm -f /etc/modules-load.d/inland-tft35.conf
 
 echo "[4/6] Cleaning config.txt entries"
+sed -i '/^# BEGIN inland-tft35$/,/^# END inland-tft35$/d' "$CONFIG"
 sed -i '/^# Inland TFT35 ILI9481 display/d' "$CONFIG"
 sed -i '/^dtoverlay=inland-ili9481-overlay/d' "$CONFIG"
 sed -i '/^dtoverlay=ads7846,/d' "$CONFIG"
