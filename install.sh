@@ -93,6 +93,37 @@ remove_lines() {
     done
 }
 
+patch_fbtft_for_modern_kernel() {
+    local core="$FBTFT_DIR/fbtft-core.c"
+    local header="$FBTFT_DIR/fbtft.h"
+
+    [ -f "$core" ] || return 0
+    [ -f "$header" ] || return 0
+
+    echo "Applying compatibility updates for modern kernels (6.x)..."
+
+    grep -q 'linux/timekeeping.h' "$core" || \
+        sed -i '/#include <linux\/delay.h>/a #include <linux/timekeeping.h>' "$core"
+    grep -q 'linux/of_gpio.h' "$core" || \
+        sed -i '/#include <linux\/gpio.h>/a #include <linux/of_gpio.h>' "$core"
+
+    sed -i 's/struct timespec update_time;/struct timespec64 update_time;/' "$header"
+
+    sed -i 's/enum of_gpio_flags of_flags;/unsigned long of_flags = 0;/' "$core"
+    sed -i 's/of_get_named_gpio_flags(node, name, index, &of_flags)/of_get_named_gpio(node, name, index)/' "$core"
+    sed -i 's/(of_flags & OF_GPIO_ACTIVE_LOW) ? GPIOF_OUT_INIT_LOW : GPIOF_OUT_INIT_HIGH/GPIOF_OUT_INIT_HIGH/' "$core"
+
+    sed -i 's/getnstimeofday/ktime_get_ts64/g' "$core"
+    sed -i 's/timespec_sub/timespec64_sub/g' "$core"
+    sed -i 's/struct timespec /struct timespec64 /g' "$core"
+
+    sed -i 's/FBINFO_FLAG_DEFAULT/FBINFO_DEFAULT/g' "$core"
+    sed -i 's/spi->master->bus_num/spi->controller->bus_num/g' "$core"
+    sed -i 's/par->spi->master->setup(par->spi)/spi_setup(par->spi)/g' "$core"
+
+    sed -i 's/ret = unregister_framebuffer(fb_info);/unregister_framebuffer(fb_info);\n\tret = 0;/' "$core"
+}
+
 echo "Inland TFT35 ILI9481 installer"
 echo "Config: $CONFIG"
 echo "Cmdline: $CMDLINE"
@@ -139,6 +170,7 @@ else
     rm -rf "$FBTFT_DIR"
     git clone https://github.com/notro/fbtft.git "$FBTFT_DIR"
 fi
+patch_fbtft_for_modern_kernel
 make -C "${KERNEL_BUILD_DIR}" M="$FBTFT_DIR" modules
 make -C "${KERNEL_BUILD_DIR}" M="$FBTFT_DIR" modules_install
 
