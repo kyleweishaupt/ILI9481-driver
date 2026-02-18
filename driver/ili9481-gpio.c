@@ -141,7 +141,7 @@ static void ili9481_flush(struct fb_info *info,
 			  struct list_head *pagereflist)
 {
 	struct ili9481_priv *par = info->par;
-	u16 *vmem = info->screen_buffer;
+	u16 *vmem = (u16 *)info->screen_buffer;
 	unsigned int npixels, i;
 
 	/* Column address range — full width */

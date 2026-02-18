@@ -278,10 +278,16 @@ fi
 cat >> "$CONFIG" <<'EOF'
 
 # BEGIN inland-tft35
-dtparam=spi=on
 disable_fw_kms_setup=1
 dtoverlay=inland-ili9481-overlay
 EOF
+
+# SPI uses GPIO 7 (CE1) and GPIO 8 (CE0) which conflict with DB0/DB1
+# on the parallel data bus.  Only enable SPI when touch is requested;
+# even then the kernel may report pin-mux conflicts on some boards.
+if [ "$TOUCH" -eq 1 ]; then
+    sed -i '/^# BEGIN inland-tft35$/a dtparam=spi=on' "$CONFIG"
+fi
 
 if [ "$TOUCH" -eq 1 ]; then
     echo "dtoverlay=ads7846,cs=1,speed=2000000,penirq=${TOUCH_IRQ},penirq_pull=2,xohms=${TOUCH_XOHMS},pmax=${TOUCH_PMAX}" >> "$CONFIG"
