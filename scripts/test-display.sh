@@ -34,23 +34,74 @@ info() { echo -e "${YEL}[INFO]${RST} $*"; }
 ERRORS=0
 PASSES=0
 
-echo "=== Inland TFT35 Display Test ==="
+echo "=== Inland TFT35 Display Diagnostic ==="
 echo ""
 
-# ── 1. Check fb_ili9486 module is loaded ─────────────────────────────
+# ── Determine config paths ──────────────────────────────────────────
+
+CONFIG="/boot/config.txt"
+if [ -d "/boot/firmware" ]; then
+    CONFIG="/boot/firmware/config.txt"
+fi
+
+# ═════════════════════════════════════════════════════════════════════
+# 1. Check for fbtft blacklists (most common cause of white screen)
+# ═════════════════════════════════════════════════════════════════════
+
+BLACKLISTED=0
+for conf in /etc/modprobe.d/*.conf; do
+    [ -f "$conf" ] || continue
+    if grep -qE '^blacklist\s+(fbtft|fb_ili9486)' "$conf" 2>/dev/null; then
+        fail "fbtft is BLACKLISTED in $conf"
+        grep -E '^blacklist\s+(fbtft|fb_ili9486)' "$conf" | while IFS= read -r line; do
+            echo "     $line"
+        done
+        BLACKLISTED=1
+    fi
+done
+if [ "$BLACKLISTED" -eq 0 ]; then
+    pass "No fbtft blacklists found in /etc/modprobe.d/"
+fi
+
+# Check initramfs for cached blacklists
+if [ -f /boot/firmware/initramfs* ] || [ -f /boot/initrd* ]; then
+    if lsinitramfs /boot/firmware/initramfs* 2>/dev/null | grep -q modprobe; then
+        info "initramfs exists — if blacklists were recently removed, run:"
+        info "  sudo update-initramfs -u"
+    fi
+fi
+
+# ═════════════════════════════════════════════════════════════════════
+# 2. Check kernel module availability
+# ═════════════════════════════════════════════════════════════════════
+
+if modinfo fb_ili9486 >/dev/null 2>&1; then
+    pass "Kernel module fb_ili9486 is available"
+elif modinfo fbtft >/dev/null 2>&1; then
+    pass "Kernel module fbtft is available (fb_ili9486 may be built-in)"
+else
+    fail "Neither fb_ili9486 nor fbtft kernel modules found"
+    info "Your kernel may not include fbtft. Check: uname -r"
+fi
+
+# ═════════════════════════════════════════════════════════════════════
+# 3. Check if fb_ili9486 / fbtft module is loaded
+# ═════════════════════════════════════════════════════════════════════
 
 if lsmod | grep -q 'fb_ili9486\|fbtft'; then
-    pass "fbtft driver is loaded (fb_ili9486 / fbtft)"
+    pass "fbtft driver is loaded"
     lsmod | grep -E 'fb_ili9486|fbtft' | while IFS= read -r line; do
         echo "     $line"
     done
 else
     fail "fbtft driver is NOT loaded"
-    info "Check: dmesg | grep -i fbtft"
-    info "Verify config.txt has: dtoverlay=piscreen (or waveshare35a)"
+    info "This means the overlay did not probe the driver at boot."
+    info "Check: dmesg | grep -i 'fbtft\|ili9486\|spi'"
 fi
 
-# ── 2. Find fbtft framebuffer ────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════
+# 4. Find fbtft framebuffer
+# ═════════════════════════════════════════════════════════════════════
 
 FB_DEV=""
 FB_NAME=""
@@ -68,11 +119,16 @@ if [ -n "$FB_DEV" ]; then
     pass "Framebuffer device: ${FB_DEV} (${FB_NAME})"
 else
     fail "No fbtft framebuffer found (expected name containing 'ili9486')"
-    info "Check: ls /sys/class/graphics/fb*/name"
-    info "Check: dmesg | grep -i 'fbtft\|ili9486'"
+    # List what framebuffers DO exist
+    for fb in /sys/class/graphics/fb*; do
+        [ -d "$fb" ] || continue
+        echo "     $(basename "$fb"): $(cat "$fb/name" 2>/dev/null || echo '(unknown)')"
+    done
 fi
 
-# ── 3. Check dmesg for driver messages ──────────────────────────────
+# ═════════════════════════════════════════════════════════════════════
+# 5. Check dmesg for driver messages
+# ═════════════════════════════════════════════════════════════════════
 
 if dmesg 2>/dev/null | grep -qi "ili9486\|fbtft"; then
     pass "Driver messages present in kernel log"
@@ -81,9 +137,75 @@ if dmesg 2>/dev/null | grep -qi "ili9486\|fbtft"; then
     done
 else
     info "No fbtft/ili9486 messages in dmesg (ring buffer may have rotated)"
+    # Check for SPI errors that might explain why fbtft didn't load
+    if dmesg 2>/dev/null | grep -qi "spi.*error\|spi.*fail"; then
+        fail "SPI errors found in dmesg:"
+        dmesg | grep -iE "spi.*(error|fail)" | tail -3 | while IFS= read -r line; do
+            echo "     $line"
+        done
+    fi
 fi
 
-# ── 4. Check ADS7846 touch input device ─────────────────────────────
+# ═════════════════════════════════════════════════════════════════════
+# 6. Check config.txt for correct overlay + settings
+# ═════════════════════════════════════════════════════════════════════
+
+if [ -f "$CONFIG" ]; then
+    # Check overlay
+    if grep -q '^dtoverlay=piscreen\|^dtoverlay=waveshare35a' "$CONFIG"; then
+        OVERLAY_LINE=$(grep '^dtoverlay=piscreen\|^dtoverlay=waveshare35a' "$CONFIG" | head -1)
+        pass "Overlay configured: ${OVERLAY_LINE}"
+    else
+        fail "No piscreen/waveshare35a overlay in ${CONFIG}"
+        info "Run: sudo ./install.sh"
+    fi
+
+    # Check vc4-kms-v3d is disabled
+    if grep -q '^dtoverlay=vc4-kms-v3d' "$CONFIG"; then
+        fail "vc4-kms-v3d is ACTIVE (must be commented out for fbtft)"
+        info "Run: sudo ./install.sh (it handles this automatically)"
+    else
+        pass "vc4-kms-v3d is disabled"
+    fi
+
+    # Check display_auto_detect
+    if grep -q '^display_auto_detect=1' "$CONFIG"; then
+        fail "display_auto_detect is ACTIVE (should be commented out)"
+        info "Run: sudo ./install.sh"
+    else
+        pass "display_auto_detect is disabled"
+    fi
+
+    # Check SPI
+    if grep -q '^dtparam=spi=on' "$CONFIG"; then
+        pass "SPI is enabled"
+    else
+        fail "SPI is NOT enabled in ${CONFIG}"
+    fi
+fi
+
+# ═════════════════════════════════════════════════════════════════════
+# 7. Check display backend (Wayland vs X11)
+# ═════════════════════════════════════════════════════════════════════
+
+if command -v raspi-config >/dev/null 2>&1; then
+    WAYLAND_STATUS=$(raspi-config nonint get_wayland 2>/dev/null || echo "unknown")
+    if [ "$WAYLAND_STATUS" = "0" ]; then
+        fail "Wayland is ACTIVE — fbtft requires X11"
+        info "fbtft creates legacy framebuffers, not DRM devices."
+        info "Wayland compositors (labwc) will crash without DRM."
+        info "Fix: sudo raspi-config → Advanced → Wayland → X11"
+        info "  or re-run: sudo ./install.sh"
+    elif [ "$WAYLAND_STATUS" = "1" ]; then
+        pass "Display backend is X11"
+    else
+        info "Could not determine display backend"
+    fi
+fi
+
+# ═════════════════════════════════════════════════════════════════════
+# 8. Check ADS7846 touch input device
+# ═════════════════════════════════════════════════════════════════════
 
 TOUCH_DEV=""
 if [ -f /proc/bus/input/devices ]; then
@@ -97,11 +219,11 @@ if [ -f /proc/bus/input/devices ]; then
         info "Check wiring (IRQ=GPIO17, SPI0 CE1)"
         info "Check: cat /proc/bus/input/devices"
     fi
-else
-    info "Cannot check touch input (/proc/bus/input/devices not available)"
 fi
 
-# ── 5. Check fbcon mapping ──────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════
+# 9. Check fbcon mapping
+# ═════════════════════════════════════════════════════════════════════
 
 if [ -n "$FB_DEV" ]; then
     FB_NUM=$(basename "$FB_DEV" | sed 's/fb//')
@@ -110,7 +232,6 @@ if [ -n "$FB_DEV" ]; then
         MAP_NUM=$(echo "$FBCON_MAP" | sed 's/fbcon=map://')
         if [ "$MAP_NUM" != "$FB_NUM" ]; then
             fail "fbcon mapped to fb${MAP_NUM} but fbtft is fb${FB_NUM}"
-            info "The inland-tft35-display.service should handle this at boot."
             info "Check: systemctl status inland-tft35-display.service"
         else
             pass "fbcon correctly mapped to fb${FB_NUM}"
@@ -119,7 +240,6 @@ if [ -n "$FB_DEV" ]; then
         info "No fbcon=map: in cmdline (fbcon uses first available fb)"
     fi
 
-    # Check vtconsole binding
     for vtcon in /sys/class/vtconsole/vtcon*; do
         [ -d "$vtcon" ] || continue
         vtname=$(cat "$vtcon/name" 2>/dev/null || true)
@@ -134,29 +254,31 @@ if [ -n "$FB_DEV" ]; then
     done
 fi
 
-# ── 6. Check config.txt for overlay ─────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════
+# 10. Check systemd service
+# ═════════════════════════════════════════════════════════════════════
 
-CONFIG="/boot/config.txt"
-if [ -d "/boot/firmware" ]; then
-    CONFIG="/boot/firmware/config.txt"
-fi
-
-if [ -f "$CONFIG" ]; then
-    if grep -q "^dtoverlay=piscreen\|^dtoverlay=waveshare35a" "$CONFIG"; then
-        OVERLAY_LINE=$(grep "^dtoverlay=piscreen\|^dtoverlay=waveshare35a" "$CONFIG" | head -1)
-        pass "Overlay configured: ${OVERLAY_LINE}"
+if systemctl is-enabled inland-tft35-display.service >/dev/null 2>&1; then
+    pass "inland-tft35-display.service is enabled"
+    if systemctl is-active inland-tft35-display.service >/dev/null 2>&1; then
+        pass "inland-tft35-display.service ran successfully"
     else
-        fail "No piscreen/waveshare35a overlay in ${CONFIG}"
-        info "Run: sudo ./install.sh"
+        SVC_STATUS=$(systemctl is-active inland-tft35-display.service 2>/dev/null || echo "unknown")
+        if [ "$SVC_STATUS" = "inactive" ]; then
+            info "inland-tft35-display.service has not run yet (reboot needed?)"
+        else
+            fail "inland-tft35-display.service status: ${SVC_STATUS}"
+            info "Check: sudo journalctl -u inland-tft35-display.service"
+        fi
     fi
-
-    if grep -q "^dtoverlay=vc4-kms-v3d" "$CONFIG"; then
-        fail "vc4-kms-v3d is active (must be commented out for fbtft)"
-        info "Run: sudo ./install.sh (it handles this automatically)"
-    fi
+else
+    fail "inland-tft35-display.service is not enabled"
+    info "Run: sudo ./install.sh"
 fi
 
-# ── 7. Optional: paint RGBW test pattern ─────────────────────────────
+# ═════════════════════════════════════════════════════════════════════
+# 11. Optional: paint RGBW test pattern
+# ═════════════════════════════════════════════════════════════════════
 
 if [ "$PAINT_PATTERN" -eq 1 ] && [ -n "$FB_DEV" ] && [ -w "$FB_DEV" ]; then
     echo ""
@@ -165,17 +287,16 @@ if [ "$PAINT_PATTERN" -eq 1 ] && [ -n "$FB_DEV" ] && [ -w "$FB_DEV" ]; then
     info "Framebuffer format: ${BPP_BITS} bits/pixel"
     info "Painting RGBW colour bar test pattern to ${FB_DEV} ..."
 
-    # 320x480 @ RGB565 = 307200 bytes (native portrait)
     W=320; H=480
     STRIPE=$((H / 4))
     {
-        # Red stripe   (RGB565 = 0xF800 -> little-endian: 00 F8)
+        # Red   (RGB565 = 0xF800 → LE: 00 F8)
         printf '%0.s\x00\xF8' $(seq 1 $((W * STRIPE)))
-        # Green stripe  (RGB565 = 0x07E0 -> little-endian: E0 07)
+        # Green (RGB565 = 0x07E0 → LE: E0 07)
         printf '%0.s\xE0\x07' $(seq 1 $((W * STRIPE)))
-        # Blue stripe   (RGB565 = 0x001F -> little-endian: 1F 00)
+        # Blue  (RGB565 = 0x001F → LE: 1F 00)
         printf '%0.s\x1F\x00' $(seq 1 $((W * STRIPE)))
-        # White stripe  (RGB565 = 0xFFFF -> little-endian: FF FF)
+        # White (RGB565 = 0xFFFF → LE: FF FF)
         printf '%0.s\xFF\xFF' $(seq 1 $((W * STRIPE)))
     } > "$FB_DEV"
 
@@ -184,7 +305,9 @@ elif [ "$PAINT_PATTERN" -eq 1 ]; then
     info "Skipping test pattern (no writable framebuffer device)"
 fi
 
-# ── Summary ──────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════
+# Summary
+# ═════════════════════════════════════════════════════════════════════
 
 echo ""
 echo "Results: ${PASSES} passed, ${ERRORS} failed"
@@ -194,5 +317,10 @@ if [ "$ERRORS" -eq 0 ]; then
     exit 0
 else
     fail "${ERRORS} check(s) failed — review output above"
+    echo ""
+    echo "Common fixes:"
+    echo "  White screen?  → sudo ./install.sh && sudo reboot"
+    echo "  Blacklisted?   → sudo rm /etc/modprobe.d/*fbtft* && sudo update-initramfs -u && sudo reboot"
+    echo "  Wayland?       → sudo raspi-config → Advanced → Wayland → X11"
     exit 1
 fi

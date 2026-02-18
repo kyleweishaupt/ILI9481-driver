@@ -41,15 +41,32 @@ the Pi never communicates directly with the ILI9486 controller.
 
 ## Supported Boards
 
-| Board                | Status                                 |
-| -------------------- | -------------------------------------- |
-| Raspberry Pi 3B/3B+  | ✅ Tested                              |
-| Raspberry Pi 4B      | ✅ Expected                            |
-| Raspberry Pi Zero 2W | ✅ Expected                            |
-| Raspberry Pi 5       | ⚠️ May need kernel ≥ 6.6 fbtft support |
+| Board                | Status      |
+| -------------------- | ----------- |
+| Raspberry Pi 3B/3B+  | ✅ Tested   |
+| Raspberry Pi 4B      | ✅ Expected |
+| Raspberry Pi Zero 2W | ✅ Expected |
+| Raspberry Pi 5       | ⚠️ Untested |
 
-**OS requirement:** Raspberry Pi OS Bookworm or later (with `piscreen.dtbo`
+**OS requirement:** Raspberry Pi OS Bookworm or Trixie (with `piscreen.dtbo`
 in the overlays directory).
+
+## Important: Wayland vs X11
+
+The fbtft driver creates a **legacy framebuffer** (`/dev/fbN`), not a
+DRM/KMS device. This has critical implications:
+
+- **Wayland compositors (labwc, wayfire, sway) will NOT work** — they
+  require DRM devices.
+- **X11 with the fbdev driver works** — this is what the installer
+  configures.
+- **The installer automatically switches from Wayland to X11** via
+  `raspi-config` if Wayland is detected.
+- **HDMI output is disabled** while the SPI display is active (because
+  `vc4-kms-v3d` must be commented out for fbtft).
+
+If you need HDMI back, run `sudo ./uninstall.sh` — it restores
+`vc4-kms-v3d` and re-enables HDMI.
 
 ## Installation
 
@@ -79,19 +96,22 @@ sudo ./install.sh --speed=24000000 --rotate=90
 ### What the installer does
 
 1. **Cleans old artifacts** from any previous `ili9481` DKMS driver
-2. **Verifies** the `piscreen.dtbo` overlay exists in the boot partition
-3. **Configures `/boot/firmware/config.txt`:**
+2. **Removes fbtft blacklists** from all of `/etc/modprobe.d/` and
+   **rebuilds initramfs** (cached blacklists cause white screens!)
+3. **Verifies** `piscreen.dtbo` overlay and `fb_ili9486` kernel module
+4. **Configures `/boot/firmware/config.txt`:**
    - Enables SPI (`dtparam=spi=on`)
    - Comments out `vc4-kms-v3d` (fbtft needs legacy framebuffers)
-   - Adds `disable_fw_kms_setup=1`
+   - Comments out `display_auto_detect` (prevents overlay conflicts)
+   - Ensures `disable_fw_kms_setup=1`
+   - Ensures `[all]` section exists for model-independent config
    - Adds `dtoverlay=piscreen,speed=...,rotate=...,fps=...`
-4. **Cleans `/boot/firmware/cmdline.txt`** (removes `splash` and stale `fbcon=map:`)
-5. **Creates a systemd service** (`inland-tft35-display.service`) that at
-   boot finds the fbtft framebuffer, rebinds fbcon, and updates the X11 config
-6. **Installs `xserver-xorg-video-fbdev`** and creates X11 config
-   (`/etc/X11/xorg.conf.d/99-spi-display.conf`) using the `fbdev` driver
-7. **Installs `xserver-xorg-input-evdev`** and creates touch config
-   (`/etc/X11/xorg.conf.d/99-touch-calibration.conf`)
+5. **Cleans `/boot/firmware/cmdline.txt`** (removes `splash`, stale `fbcon=map:`)
+6. **Switches from Wayland to X11** via `raspi-config` (fbtft requires X11)
+7. **Creates a systemd service** (`inland-tft35-display.service`) that at
+   boot finds the fbtft framebuffer, rebinds fbcon, updates X11 config
+8. **Installs `xserver-xorg-video-fbdev`** + creates X11 config
+9. **Installs `xserver-xorg-input-evdev`** + creates touch calibration config
    with rotation-appropriate calibration matrix + udev rule
 
 ## Uninstallation
@@ -102,27 +122,33 @@ sudo reboot
 ```
 
 This reverses all changes: removes the systemd service, X11/touch configs,
-udev rules, and boot config entries. It also re-enables `vc4-kms-v3d` for
-HDMI output and cleans up any leftover `ili9481` DKMS artifacts.
+udev rules, and boot config entries. It re-enables `vc4-kms-v3d` and
+`display_auto_detect` for HDMI output.
 
-`dtparam=spi=on` is intentionally left intact since other hardware may
-depend on it.
+To restore Wayland after uninstalling:
+
+```bash
+sudo raspi-config   # → Advanced Options → Wayland → labwc (W2)
+```
 
 ## Testing
 
 ```bash
-sudo ./scripts/test-display.sh            # Run all checks
+sudo ./scripts/test-display.sh            # Run all diagnostic checks
 sudo ./scripts/test-display.sh --pattern  # Also paint RGBW test bars
 ```
 
 The test script checks:
 
-- `fb_ili9486` / fbtft module loaded
+- fbtft blacklists in `/etc/modprobe.d/`
+- Kernel module availability
+- fbtft module loaded
 - Framebuffer device exists with correct name
-- Kernel log messages present
-- ADS7846 touch input device registered
-- fbcon mapped to the SPI display
-- `config.txt` overlay correctly configured
+- `config.txt` overlay, vc4, display_auto_detect, SPI settings
+- Display backend (Wayland vs X11)
+- ADS7846 touch input device
+- fbcon mapping and vtconsole binding
+- systemd service status
 
 ### Manual verification
 
@@ -134,14 +160,13 @@ lsmod | grep fb_ili9486
 ls /dev/fb*
 
 # Driver messages?
-dmesg | grep ili9486
+dmesg | grep -i 'fbtft\|ili9486'
 
 # Touch device?
 cat /proc/bus/input/devices | grep -A5 ADS7846
 
-# Touch events?
-sudo apt-get install -y evtest
-sudo evtest  # select ADS7846 device
+# Systemd service?
+sudo journalctl -u inland-tft35-display.service
 ```
 
 ## Touch Calibration
@@ -167,16 +192,48 @@ Then update the matrix in `/etc/X11/xorg.conf.d/99-touch-calibration.conf`.
 
 ## Troubleshooting
 
-| Symptom                   | Cause                      | Fix                                                            |
-| ------------------------- | -------------------------- | -------------------------------------------------------------- |
-| White/blank screen        | `vc4-kms-v3d` still active | Re-run `sudo ./install.sh` — it comments out `vc4-kms-v3d`     |
-| White/blank screen        | Wrong overlay              | Try `sudo ./install.sh --overlay=waveshare35a`                 |
-| No framebuffer device     | Overlay not loaded         | Check `config.txt` has `dtoverlay=piscreen`; reboot            |
-| Console on HDMI not SPI   | fbcon not rebound          | `systemctl status inland-tft35-display.service`                |
-| Touch not working         | Wiring or overlay issue    | Check IRQ=GPIO17, CE1 wiring; verify `piscreen` includes touch |
-| Touch coordinates wrong   | Needs calibration          | Run `xinput_calibrator` — see Touch Calibration above          |
-| Slow/laggy display        | SPI speed too high         | Lower speed: `sudo ./install.sh --speed=12000000`              |
-| `fb_ili9486` not in lsmod | fbtft blacklisted          | Remove `/etc/modprobe.d/*blacklist*fbtft*`; reboot             |
+| Symptom                   | Cause                                             | Fix                                                                           |
+| ------------------------- | ------------------------------------------------- | ----------------------------------------------------------------------------- |
+| White/blank screen        | fbtft blacklisted (cached in initramfs)           | `sudo rm /etc/modprobe.d/*fbtft*; sudo update-initramfs -u; sudo reboot`      |
+| White/blank screen        | Wayland active (no DRM device for labwc)          | `sudo raspi-config` → Advanced → Wayland → X11; or re-run `sudo ./install.sh` |
+| White/blank screen        | `vc4-kms-v3d` still active                        | Re-run `sudo ./install.sh`                                                    |
+| White/blank screen        | `display_auto_detect` loading conflicting overlay | Re-run `sudo ./install.sh` (it disables auto-detect)                          |
+| White/blank screen        | Wrong overlay                                     | Try `sudo ./install.sh --overlay=waveshare35a`                                |
+| No framebuffer device     | Overlay not loaded                                | Check `config.txt` has `dtoverlay=piscreen` under `[all]`; reboot             |
+| Console on HDMI not SPI   | fbcon not rebound                                 | `systemctl status inland-tft35-display.service`                               |
+| Touch not working         | Wiring or overlay issue                           | Check IRQ=GPIO17, CE1 wiring                                                  |
+| Touch coordinates wrong   | Needs calibration                                 | Run `xinput_calibrator` — see Touch Calibration above                         |
+| Slow/laggy display        | SPI speed too high                                | `sudo ./install.sh --speed=12000000`                                          |
+| `fb_ili9486` not in lsmod | Module not in kernel                              | `modinfo fb_ili9486` — if missing, kernel may not have fbtft                  |
+| Desktop doesn't appear    | xserver-xorg-video-fbdev missing                  | `sudo apt-get install xserver-xorg-video-fbdev`                               |
+| Service failed            | Framebuffer not created                           | `sudo journalctl -u inland-tft35-display.service`                             |
+
+### Nuclear option (if nothing works)
+
+If the display is still white after running `install.sh` and rebooting:
+
+```bash
+# 1. Check for ANY blacklists
+grep -r 'blacklist.*fbtft\|blacklist.*fb_ili9486' /etc/modprobe.d/
+
+# 2. Remove them ALL
+sudo rm -f /etc/modprobe.d/*blacklist*fbtft* /etc/modprobe.d/ili9481*
+
+# 3. Rebuild initramfs (CRITICAL — cached blacklists cause white screens)
+sudo update-initramfs -u
+
+# 4. Verify config.txt (should show piscreen overlay, vc4 commented out)
+cat /boot/firmware/config.txt | grep -E 'piscreen|vc4|display_auto|spi'
+
+# 5. Check display backend
+raspi-config nonint get_wayland  # 0=Wayland, 1=X11
+
+# 6. Reboot
+sudo reboot
+
+# 7. After reboot, run diagnostics
+sudo ./scripts/test-display.sh
+```
 
 ## Migrating from the old ili9481 driver
 
@@ -189,6 +246,8 @@ repository:
 3. The old driver used incorrect GPIO pins (DC=22, RST=27) and required
    a custom kernel module. The new setup uses the correct pins (DC=24,
    RST=25) via the built-in `piscreen` overlay
+4. **The old installer blacklisted fbtft** — the new installer removes
+   the blacklist AND rebuilds initramfs to clear the cached version
 
 ## Repository Structure
 
@@ -196,7 +255,7 @@ repository:
 ├── install.sh              # Configuration installer
 ├── uninstall.sh            # Configuration uninstaller
 ├── scripts/
-│   └── test-display.sh     # Display/touch validation script
+│   └── test-display.sh     # Display/touch diagnostic script
 ├── .github/
 │   └── workflows/
 │       └── lint.yml        # ShellCheck CI
@@ -205,9 +264,8 @@ repository:
 
 ## How it works
 
-Unlike the previous approach (custom out-of-tree DRM/KMS kernel module),
-this setup relies entirely on drivers and overlays already built into the
-Raspberry Pi OS kernel:
+This setup relies entirely on drivers and overlays already built into
+the Raspberry Pi OS kernel:
 
 - **`piscreen` overlay**: Configures SPI0 with the ILI9486 fbtft driver
   and ADS7846 touch controller using the correct GPIO pins for MPI3501
@@ -217,9 +275,9 @@ Raspberry Pi OS kernel:
 - **`ads7846` module**: Standard kernel touchscreen driver for XPT2046
 
 The `vc4-kms-v3d` overlay must be disabled because fbtft creates a legacy
-framebuffer device (`/dev/fbN`) which is incompatible with the DRM/KMS
-graphics stack. This means GPU-accelerated HDMI output is not available
-when the SPI display is active.
+framebuffer device (`/dev/fbN`). Wayland compositors require DRM/KMS
+devices and will crash without one, so the installer switches to X11
+with the `fbdev` driver to render on the fbtft framebuffer.
 
 ## License
 
