@@ -228,10 +228,10 @@ systemctl daemon-reload
 systemctl enable ili9481-fb.service
 
 # =====================================================================
-# [6/8] X11 framebuffer and touch configuration
+# [6/8] X11 framebuffer and touch configuration (only if requested)
 # =====================================================================
 
-echo "[6/8] Installing X11 framebuffer and touch configuration"
+echo "[6/8] X11 configuration"
 
 mkdir -p /etc/X11/xorg.conf.d
 
@@ -266,62 +266,32 @@ else
 fi
 
 # =====================================================================
-# [7/8] Boot-time framebuffer mapping service
+# [7/8] Clean up legacy boot mapping service
 # =====================================================================
 
-echo "[7/8] Enabling boot mapping service"
+echo "[7/8] Cleaning legacy boot mapper"
 
-cat > /usr/local/bin/inland-tft35-boot <<'BOOTSCRIPT'
-#!/bin/bash
-set -euo pipefail
-
-# Only remap consoles/X11 if the ili9481-fb daemon is actually running.
-# This prevents HDMI from going dark if the daemon failed to start.
-if ! systemctl is-active --quiet ili9481-fb.service 2>/dev/null; then
-    echo "ili9481-fb.service is not active — skipping console remap" >&2
-    exit 0
-fi
-
-# Only remap consoles if X11-on-TFT mode was requested
-if [ -f /etc/X11/xorg.conf.d/99-inland-fbdev.conf ]; then
-    if command -v con2fbmap >/dev/null 2>&1; then
-        for vt in 1 2 3 4 5 6; do
-            con2fbmap "$vt" 0 >/dev/null 2>&1 || true
-        done
-    fi
-fi
-BOOTSCRIPT
-chmod 755 /usr/local/bin/inland-tft35-boot
-
-cat > /etc/systemd/system/inland-tft35-boot.service <<'EOF'
-[Unit]
-Description=Inland TFT35 framebuffer mapper
-After=systemd-modules-load.service ili9481-fb.service
-Requires=ili9481-fb.service
-Before=display-manager.service
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/inland-tft35-boot
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-systemctl daemon-reload
-systemctl enable inland-tft35-boot.service
+# Remove the inland-tft35-boot service — the daemon runs independently
+# and must never block display-manager or any other service.
+systemctl disable --now inland-tft35-boot.service >/dev/null 2>&1 || true
+rm -f /etc/systemd/system/inland-tft35-boot.service
+rm -f /usr/local/bin/inland-tft35-boot
+systemctl daemon-reload 2>/dev/null || true
 
 # =====================================================================
-# [8/8] Switch to X11 if using Wayland
+# [8/8] Final checks (non-destructive)
 # =====================================================================
 
-echo "[8/8] Checking desktop backend"
+echo "[8/8] Final checks"
 
+# Do NOT force a Wayland→X11 switch.  The daemon mirrors /dev/fb0
+# regardless of whether the desktop uses Wayland or X11.
 if command -v raspi-config >/dev/null 2>&1; then
     WAYLAND_STATE="$(raspi-config nonint get_wayland 2>/dev/null || echo unknown)"
     if [ "$WAYLAND_STATE" = "0" ]; then
-        raspi-config nonint do_wayland W1 || true
+        echo "  Desktop backend: Wayland (daemon will still work — it reads fb0 directly)"
+    else
+        echo "  Desktop backend: X11"
     fi
 fi
 

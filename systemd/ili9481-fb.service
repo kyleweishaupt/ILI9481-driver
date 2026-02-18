@@ -1,16 +1,18 @@
 [Unit]
 Description=ILI9481 userspace framebuffer driver
-After=systemd-modules-load.service local-fs.target
-Before=display-manager.service
+After=local-fs.target
+# Safety: never reboot/halt/etc on repeated failure — just stop retrying.
+StartLimitBurst=3
+StartLimitIntervalSec=120
+StartLimitAction=none
 
 [Service]
 Type=simple
+# Give the kernel time to initialise /dev/fb0 and /dev/gpiomem before we grab them.
+ExecStartPre=/bin/sleep 3
 ExecStart=/usr/local/bin/ili9481-fb --config=/etc/ili9481/ili9481.conf
-ExecStopPost=-/bin/sh -c 'command -v con2fbmap >/dev/null && for vt in 1 2 3 4 5 6; do con2fbmap $vt 0 2>/dev/null; done || true'
 Restart=on-failure
-RestartSec=5
-StartLimitBurst=3
-StartLimitIntervalSec=30
+RestartSec=10
 StandardOutput=journal
 StandardError=journal
 

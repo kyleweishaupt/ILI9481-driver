@@ -111,10 +111,9 @@ echo "[7/7] Removing overlay artifacts"
 rm -f "${OVERLAYS_DIR}/inland-ili9481-overlay.dtbo"
 rm -f "${OVERLAYS_DIR}/inland-ili9481-overlay.dts"
 
-# Optionally restore Wayland
-if command -v raspi-config >/dev/null 2>&1; then
-    raspi-config nonint do_wayland W2 >/dev/null 2>&1 || true
-fi
+# Do NOT automatically switch the desktop backend — leave it as the user had it.
+# If the install.sh changed Wayland→X11, the user can restore it themselves via:
+#   sudo raspi-config → Advanced Options → Wayland
 
 echo
 echo "Uninstall complete."

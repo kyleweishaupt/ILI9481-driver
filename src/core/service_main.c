@@ -240,10 +240,22 @@ int main(int argc, char **argv)
     uint16_t disp_w, disp_h;
     get_display_size(cfg.rotation, &disp_w, &disp_h);
 
-    /* Open GPIO MMIO bus */
-    bus = gpio_bus_open();
+    /* Open GPIO MMIO bus — retry if /dev/gpiomem isn't ready yet */
+    {
+        int gpio_retries = 3;
+        while (gpio_retries-- > 0) {
+            bus = gpio_bus_open();
+            if (bus)
+                break;
+            if (gpio_retries > 0) {
+                log_warn("/dev/gpiomem not ready, retrying in 2 s (%d left)...",
+                         gpio_retries);
+                sleep(2);
+            }
+        }
+    }
     if (!bus) {
-        log_error("Failed to open GPIO bus — aborting");
+        log_error("Failed to open GPIO bus after retries — aborting");
         goto out;
     }
 
@@ -271,10 +283,23 @@ int main(int argc, char **argv)
         goto out;
     }
 
-    /* Open the framebuffer */
-    fb = fb_provider_init(cfg.fb_device, disp_w, disp_h);
+    /* Open the framebuffer — retry a few times because fb0 may not be
+     * available immediately after boot (vc4 drm init is asynchronous). */
+    {
+        int fb_retries = 5;
+        while (fb_retries-- > 0) {
+            fb = fb_provider_init(cfg.fb_device, disp_w, disp_h);
+            if (fb)
+                break;
+            if (fb_retries > 0) {
+                log_warn("Framebuffer %s not ready, retrying in 2 s (%d left)...",
+                         cfg.fb_device, fb_retries);
+                sleep(2);
+            }
+        }
+    }
     if (!fb) {
-        log_error("Failed to initialise framebuffer — aborting");
+        log_error("Failed to initialise framebuffer after retries — aborting");
         goto out;
     }
 
