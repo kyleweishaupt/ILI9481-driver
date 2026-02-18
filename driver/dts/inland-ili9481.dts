@@ -1,0 +1,73 @@
+/*
+ * inland-ili9481.dts — Device-tree overlay for the Inland TFT35 display shield
+ *
+ * SPDX-License-Identifier: GPL-2.0-only
+ *
+ * This is a REFERENCE file.  install.sh generates the actual overlay with
+ * the user-chosen rotation and fps values.  Edit the GPIO numbers below only
+ * if your board wiring differs from the standard Kedei / Inland mapping.
+ *
+ * GPIO polarity flags (numeric, no #include needed):
+ *   0 = GPIO_ACTIVE_HIGH
+ *   1 = GPIO_ACTIVE_LOW
+ *
+ * Pin mapping (active-low for control strobes, active-high for data bus):
+ *
+ *   RST  = GPIO 27   (active-low — directly drives /RST through 74HC245)
+ *   DC   = GPIO 22   (active-high — HIGH = data, LOW = command)
+ *   WR   = GPIO 17   (active-low — directly drives /WR through 74HC245)
+ *
+ *   DB0  = GPIO  7     DB8  = GPIO 12
+ *   DB1  = GPIO  8     DB9  = GPIO 16
+ *   DB2  = GPIO 25     DB10 = GPIO 20
+ *   DB3  = GPIO 24     DB11 = GPIO 21
+ *   DB4  = GPIO 23     DB12 = GPIO  5
+ *   DB5  = GPIO 18     DB13 = GPIO  6
+ *   DB6  = GPIO 15     DB14 = GPIO 13
+ *   DB7  = GPIO 14     DB15 = GPIO 19
+ */
+
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2835";
+
+	fragment@0 {
+		target-path = "/";
+		__overlay__ {
+			inland_tft35: ili9481@0 {
+				compatible = "inland,ili9481-gpio";
+				status     = "okay";
+
+				rotate = <270>;
+				fps    = <30>;
+
+				/* --- Control signals --- */
+				rst-gpios = <&gpio 27 1>;	/* GPIO_ACTIVE_LOW  */
+				dc-gpios  = <&gpio 22 0>;	/* GPIO_ACTIVE_HIGH */
+				wr-gpios  = <&gpio 17 1>;	/* GPIO_ACTIVE_LOW  */
+
+				/* --- 16-bit data bus (DB0 → DB15) --- */
+				data-gpios = <
+					&gpio  7 0	/* DB0  */
+					&gpio  8 0	/* DB1  */
+					&gpio 25 0	/* DB2  */
+					&gpio 24 0	/* DB3  */
+					&gpio 23 0	/* DB4  */
+					&gpio 18 0	/* DB5  */
+					&gpio 15 0	/* DB6  */
+					&gpio 14 0	/* DB7  */
+					&gpio 12 0	/* DB8  */
+					&gpio 16 0	/* DB9  */
+					&gpio 20 0	/* DB10 */
+					&gpio 21 0	/* DB11 */
+					&gpio  5 0	/* DB12 */
+					&gpio  6 0	/* DB13 */
+					&gpio 13 0	/* DB14 */
+					&gpio 19 0	/* DB15 */
+				>;
+			};
+		};
+	};
+};

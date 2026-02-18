@@ -1,5 +1,12 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0-only
+#
+# test-display.sh — Validate the Inland TFT35 ILI9481 installation
+#
+# Checks kernel module, framebuffer, overlay, touch, X11 config, and
+# optionally writes a random test pattern to the display.
+#
+# Usage: sudo ./scripts/test-display.sh [--pattern]
 
 set -euo pipefail
 
@@ -15,6 +22,10 @@ for arg in "$@"; do
             ;;
     esac
 done
+
+# =====================================================================
+# Formatters
+# =====================================================================
 
 RED='\033[0;31m'
 GRN='\033[0;32m'
@@ -36,16 +47,15 @@ fi
 echo "=== Inland TFT35 ILI9481 Validation ==="
 echo
 
+# =====================================================================
+# [1] Kernel module availability
+# =====================================================================
+
 echo "[1] Kernel module availability"
-if modinfo fb_ili9481 >/dev/null 2>&1; then
-    pass "fb_ili9481 module is available"
+if modinfo ili9481_gpio >/dev/null 2>&1; then
+    pass "ili9481_gpio module is available"
 else
-    fail "fb_ili9481 module is not available"
-fi
-if modinfo fbtft >/dev/null 2>&1; then
-    pass "fbtft module is available"
-else
-    fail "fbtft module is not available"
+    fail "ili9481_gpio module is not available"
 fi
 if modinfo ads7846 >/dev/null 2>&1; then
     pass "ads7846 touch module is available"
@@ -54,20 +64,26 @@ else
 fi
 echo
 
+# =====================================================================
+# [2] Loaded modules
+# =====================================================================
+
 echo "[2] Loaded modules"
-for module in fbtft fb_ili9481; do
-    if lsmod | awk '{print $1}' | grep -qx "$module"; then
-        pass "Loaded: $module"
-    else
-        fail "Missing from lsmod: $module"
-    fi
-done
+if lsmod | awk '{print $1}' | grep -qx "ili9481_gpio"; then
+    pass "Loaded: ili9481_gpio"
+else
+    fail "Missing from lsmod: ili9481_gpio"
+fi
 if lsmod | awk '{print $1}' | grep -qx ads7846; then
     pass "Loaded: ads7846"
 else
     info "ads7846 not currently loaded"
 fi
 echo
+
+# =====================================================================
+# [3] Overlay config
+# =====================================================================
 
 echo "[3] Overlay config"
 if grep -q '^dtoverlay=inland-ili9481-overlay' "$CONFIG"; then
@@ -81,6 +97,10 @@ else
     info "ads7846 overlay not present in config"
 fi
 echo
+
+# =====================================================================
+# [4] Runtime overlays
+# =====================================================================
 
 echo "[4] Runtime overlays"
 runtime_overlay=0
@@ -100,6 +120,10 @@ else
 fi
 echo
 
+# =====================================================================
+# [5] Framebuffer
+# =====================================================================
+
 echo "[5] Framebuffer"
 FB_DEV=""
 for fb in /sys/class/graphics/fb*; do
@@ -116,6 +140,10 @@ if [ -z "$FB_DEV" ]; then
 fi
 echo
 
+# =====================================================================
+# [6] fbcon mapping
+# =====================================================================
+
 echo "[6] fbcon mapping"
 if grep -q 'fbcon=map:' /proc/cmdline; then
     pass "Kernel cmdline includes fbcon mapping"
@@ -123,6 +151,10 @@ else
     fail "Kernel cmdline missing fbcon=map"
 fi
 echo
+
+# =====================================================================
+# [7] Touch input device
+# =====================================================================
 
 echo "[7] Touch input device"
 if [ -f /proc/bus/input/devices ] && grep -qiE 'ADS7846|XPT2046' /proc/bus/input/devices; then
@@ -132,6 +164,10 @@ else
     fail "Touch input device not detected"
 fi
 echo
+
+# =====================================================================
+# [8] Desktop backend
+# =====================================================================
 
 echo "[8] Desktop backend"
 if command -v raspi-config >/dev/null 2>&1; then
@@ -151,6 +187,10 @@ else
 fi
 echo
 
+# =====================================================================
+# [9] Pattern write (optional)
+# =====================================================================
+
 if [ "$PAINT_PATTERN" -eq 1 ]; then
     echo "[9] Pattern write"
     if [ -n "$FB_DEV" ]; then
@@ -164,6 +204,10 @@ if [ "$PAINT_PATTERN" -eq 1 ]; then
     fi
     echo
 fi
+
+# =====================================================================
+# Summary
+# =====================================================================
 
 echo "=== Summary ==="
 echo "Passes: $PASSES"

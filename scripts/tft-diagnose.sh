@@ -1,7 +1,18 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0-only
+#
+# tft-diagnose.sh — Boot-to-desktop diagnostics for Inland ILI9481 display
+#
+# Checks overlay state, module state, framebuffer, fbcon, touch input,
+# desktop backend, and performs a framebuffer write test.
+#
+# Usage: sudo ./scripts/tft-diagnose.sh
 
 set -euo pipefail
+
+# =====================================================================
+# Formatters
+# =====================================================================
 
 RED='\033[0;31m'
 GRN='\033[0;32m'
@@ -23,6 +34,10 @@ fi
 echo "=== Inland ILI9481 Boot-to-Desktop Diagnostics ==="
 echo
 
+# =====================================================================
+# [1] Overlay state
+# =====================================================================
+
 echo "[1] Overlay state"
 found_overlay=0
 if [ -d /proc/device-tree/chosen/overlays ]; then
@@ -41,20 +56,26 @@ else
 fi
 echo
 
+# =====================================================================
+# [2] Module state
+# =====================================================================
+
 echo "[2] Module state"
-for module in fbtft fb_ili9481; do
-    if lsmod | awk '{print $1}' | grep -qx "$module"; then
-        pass "Loaded module: $module"
-    else
-        fail "Missing module: $module"
-    fi
-done
+if lsmod | awk '{print $1}' | grep -qx "ili9481_gpio"; then
+    pass "Loaded module: ili9481_gpio"
+else
+    fail "Missing module: ili9481_gpio"
+fi
 if lsmod | awk '{print $1}' | grep -qx ads7846; then
     pass "Loaded module: ads7846"
 else
     info "ads7846 module not loaded"
 fi
 echo
+
+# =====================================================================
+# [3] Framebuffer
+# =====================================================================
 
 echo "[3] Framebuffer"
 FB_DEV=""
@@ -79,6 +100,10 @@ for fb_dir in /sys/class/graphics/fb*; do
 done
 echo
 
+# =====================================================================
+# [4] fbcon and desktop
+# =====================================================================
+
 echo "[4] fbcon and desktop"
 if grep -q 'fbcon=map:' /proc/cmdline; then
     pass "fbcon map present on kernel command line"
@@ -102,6 +127,10 @@ else
 fi
 echo
 
+# =====================================================================
+# [5] Touch
+# =====================================================================
+
 echo "[5] Touch"
 if [ -f /proc/bus/input/devices ] && grep -qiE 'ADS7846|XPT2046' /proc/bus/input/devices; then
     pass "Touch controller detected in input devices"
@@ -109,6 +138,10 @@ else
     fail "Touch controller not detected"
 fi
 echo
+
+# =====================================================================
+# [6] Framebuffer write test
+# =====================================================================
 
 echo "[6] Framebuffer write test"
 if [ -n "$FB_DEV" ] && [ -e "$FB_DEV" ]; then

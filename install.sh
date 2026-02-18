@@ -1,7 +1,21 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0-only
+#
+# install.sh — Inland TFT35 ILI9481 (16-bit parallel GPIO) installer
+#
+# Builds a self-contained out-of-tree kernel module (ili9481-gpio) from the
+# local driver/ directory, generates a device-tree overlay, configures boot
+# parameters, and optionally sets up ADS7846/XPT2046 touch support.
+#
+# Targets: Raspberry Pi OS Trixie (Debian 13, kernel 6.12+, 64-bit)
+#
+# Usage:  sudo ./install.sh [OPTIONS]
 
 set -euo pipefail
+
+# =====================================================================
+# Defaults
+# =====================================================================
 
 ROTATE=270
 FPS=30
@@ -10,26 +24,21 @@ TOUCH_IRQ=17
 TOUCH_XOHMS=150
 TOUCH_PMAX=255
 FB_MAP=10
-FBTFT_DIR="/usr/local/src/inland-fbtft"
+
+# =====================================================================
+# Argument parsing
+# =====================================================================
 
 for arg in "$@"; do
     case "$arg" in
-        --rotate=*)
-            ROTATE="${arg#*=}"
-            ;;
-        --fps=*)
-            FPS="${arg#*=}"
-            ;;
-        --no-touch)
-            TOUCH=0
-            ;;
-        --touch-irq=*)
-            TOUCH_IRQ="${arg#*=}"
-            ;;
+        --rotate=*)    ROTATE="${arg#*=}" ;;
+        --fps=*)       FPS="${arg#*=}" ;;
+        --no-touch)    TOUCH=0 ;;
+        --touch-irq=*) TOUCH_IRQ="${arg#*=}" ;;
         --help|-h)
             echo "Usage: sudo ./install.sh [OPTIONS]"
             echo "  --rotate=DEG      Display rotation: 0, 90, 180, 270 (default: 270)"
-            echo "  --fps=N           Frame rate hint for overlay (default: 30)"
+            echo "  --fps=N           Framebuffer refresh rate (default: 30)"
             echo "  --no-touch        Skip XPT2046/ADS7846 touch setup"
             echo "  --touch-irq=GPIO  Touch IRQ GPIO (default: 17)"
             exit 0
@@ -41,19 +50,26 @@ for arg in "$@"; do
     esac
 done
 
+# =====================================================================
+# Sanity checks
+# =====================================================================
+
 if [ "$(id -u)" -ne 0 ]; then
     echo "Run as root: sudo ./install.sh"
     exit 1
 fi
 
 case "$ROTATE" in
-    0|90|180|270)
-        ;;
+    0|90|180|270) ;;
     *)
-        echo "Invalid --rotate value: $ROTATE"
+        echo "Invalid --rotate value: $ROTATE (must be 0, 90, 180, or 270)"
         exit 1
         ;;
 esac
+
+# =====================================================================
+# Locate boot partition paths
+# =====================================================================
 
 OVERLAYS_DIR="/boot/overlays"
 CONFIG="/boot/config.txt"
@@ -70,96 +86,56 @@ if [ ! -f "$CONFIG" ] || [ ! -f "$CMDLINE" ]; then
     exit 1
 fi
 
+# =====================================================================
+# Helpers
+# =====================================================================
+
 matrix_for_rotation() {
     case "$1" in
-        0) echo "1 0 0 0 1 0 0 0 1" ;;
-        90) echo "0 1 0 -1 0 1 0 0 1" ;;
+        0)   echo "1 0 0 0 1 0 0 0 1" ;;
+        90)  echo "0 1 0 -1 0 1 0 0 1" ;;
         180) echo "-1 0 1 0 -1 1 0 0 1" ;;
         270) echo "0 -1 1 1 0 0 0 0 1" ;;
     esac
 }
 
 ensure_line() {
-    local file="$1"
-    local line="$2"
+    local file="$1" line="$2"
     grep -qxF "$line" "$file" || echo "$line" >> "$file"
 }
 
 remove_lines() {
-    local file="$1"
-    shift
+    local file="$1"; shift
     for pattern in "$@"; do
         sed -i "$pattern" "$file"
     done
 }
 
-patch_fbtft_for_modern_kernel() {
-    local core="$FBTFT_DIR/fbtft-core.c"
-    local header="$FBTFT_DIR/fbtft.h"
-    local io="$FBTFT_DIR/fbtft-io.c"
-    local makefile="$FBTFT_DIR/Makefile"
+# =====================================================================
+# Banner
+# =====================================================================
 
-    [ -f "$core" ] || return 0
-    [ -f "$header" ] || return 0
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+DRIVER_DIR="${SCRIPT_DIR}/driver"
 
-    echo "Applying compatibility updates for modern kernels (6.x)..."
-
-    grep -q 'linux/timekeeping.h' "$core" || \
-        sed -i '/#include <linux\/delay.h>/a #include <linux/timekeeping.h>' "$core"
-    grep -q 'linux/of_gpio.h' "$core" || \
-        sed -i '/#include <linux\/gpio.h>/a #include <linux/of_gpio.h>' "$core"
-
-    sed -i 's/struct timespec update_time;/struct timespec64 update_time;/' "$header"
-
-    sed -i '/unsigned long of_flags = 0;/d' "$core"
-    sed -i '/enum of_gpio_flags of_flags;/d' "$core"
-    sed -i 's/of_get_named_gpio_flags(node, name, index, &of_flags)/of_get_named_gpio(node, name, index)/' "$core"
-    sed -i 's/(of_flags & OF_GPIO_ACTIVE_LOW) ? GPIOF_OUT_INIT_LOW : GPIOF_OUT_INIT_HIGH/GPIOF_OUT_INIT_HIGH/' "$core"
-    sed -i 's/^\([[:space:]]*flags[[:space:]]*=\).*/\1 GPIOF_OUT_INIT_HIGH;/' "$core"
-    sed -i '/^[[:space:]]*GPIOF_OUT_INIT_HIGH;[[:space:]]*$/d' "$core"
-
-    sed -i 's/getnstimeofday/ktime_get_ts64/g' "$core"
-    sed -i 's/timespec_sub/timespec64_sub/g' "$core"
-    sed -i 's/struct timespec /struct timespec64 /g' "$core"
-
-    sed -i 's/FBINFO_FLAG_DEFAULT | FBINFO_VIRTFB/FBINFO_VIRTFB/g' "$core"
-    sed -i 's/FBINFO_DEFAULT | FBINFO_VIRTFB/FBINFO_VIRTFB/g' "$core"
-    sed -i 's/FBINFO_FLAG_DEFAULT/0/g' "$core"
-    sed -i 's/FBINFO_DEFAULT/0/g' "$core"
-    sed -i 's/spi->master->bus_num/spi->controller->bus_num/g' "$core"
-    sed -i 's/par->spi->master->setup(par->spi)/spi_setup(par->spi)/g' "$core"
-
-    sed -i 's/ret = unregister_framebuffer(fb_info);/unregister_framebuffer(fb_info);\n\tret = 0;/' "$core"
-
-    if [ -f "$io" ]; then
-        sed -i '/m\.is_dma_mapped[[:space:]]*=[[:space:]]*1;/d' "$io"
-    fi
-
-    sed -i 's/\.remove = fbtft_driver_remove_spi,/\.remove = (void (*)(struct spi_device *))fbtft_driver_remove_spi,/' "$header"
-    sed -i 's/\.remove = fbtft_driver_remove_pdev,/\.remove = (void (*)(struct platform_device *))fbtft_driver_remove_pdev,/' "$header"
-
-    cat > "$makefile" <<'EOF'
-obj-m := fbtft.o fb_ili9481.o
-
-fbtft-objs := fbtft-core.o fbtft-sysfs.o fbtft-bus.o fbtft-io.o
-EOF
-}
-
-echo "Inland TFT35 ILI9481 installer"
-echo "Config: $CONFIG"
-echo "Cmdline: $CMDLINE"
+echo "Inland TFT35 ILI9481 installer (self-contained driver)"
+echo "Config:   $CONFIG"
+echo "Cmdline:  $CMDLINE"
 echo "Rotation: $ROTATE"
-echo "FPS: $FPS"
-echo "Touch: $([ "$TOUCH" -eq 1 ] && echo yes || echo no)"
+echo "FPS:      $FPS"
+echo "Touch:    $([ "$TOUCH" -eq 1 ] && echo yes || echo no)"
 echo
 
 KERNEL_RELEASE="$(uname -r)"
 KERNEL_BUILD_DIR="/lib/modules/${KERNEL_RELEASE}/build"
 
+# =====================================================================
+# [1/9] Install required packages
+# =====================================================================
+
 echo "[1/9] Installing required packages"
 apt-get update
 apt-get install -y \
-    git \
     build-essential \
     flex \
     bison \
@@ -172,32 +148,38 @@ apt-get install -y \
     xinput
 
 if [ ! -f "${KERNEL_BUILD_DIR}/Makefile" ]; then
-    echo "Kernel headers for ${KERNEL_RELEASE} were not found at ${KERNEL_BUILD_DIR}."
-    echo "Trying to install matching headers package: linux-headers-${KERNEL_RELEASE}"
+    echo "Kernel headers for ${KERNEL_RELEASE} not found. Attempting install..."
     apt-get install -y "linux-headers-${KERNEL_RELEASE}"
 fi
 
 if [ ! -f "${KERNEL_BUILD_DIR}/Makefile" ]; then
-    echo "Error: kernel headers are still missing for ${KERNEL_RELEASE}."
-    echo "Install matching headers on the Pi, then rerun install.sh."
-    echo "Suggested command: sudo apt install linux-headers-${KERNEL_RELEASE}"
+    echo "Error: kernel headers still missing for ${KERNEL_RELEASE}."
+    echo "Install them manually, then re-run this script."
+    echo "  sudo apt install linux-headers-${KERNEL_RELEASE}"
     exit 1
 fi
 
-echo "[2/9] Building and installing out-of-tree fbtft"
-if [ -d "$FBTFT_DIR/.git" ]; then
-    git -C "$FBTFT_DIR" reset --hard HEAD
-    git -C "$FBTFT_DIR" clean -fd
-    git -C "$FBTFT_DIR" pull --ff-only
-else
-    rm -rf "$FBTFT_DIR"
-    git clone https://github.com/notro/fbtft.git "$FBTFT_DIR"
+# =====================================================================
+# [2/9] Build and install ili9481-gpio kernel module
+# =====================================================================
+
+echo "[2/9] Building and installing ili9481-gpio driver"
+
+if [ ! -f "${DRIVER_DIR}/ili9481-gpio.c" ]; then
+    echo "Error: driver source not found at ${DRIVER_DIR}/ili9481-gpio.c"
+    exit 1
 fi
-patch_fbtft_for_modern_kernel
-make -C "${KERNEL_BUILD_DIR}" M="$FBTFT_DIR" modules
-make -C "${KERNEL_BUILD_DIR}" M="$FBTFT_DIR" modules_install
+
+make -C "${KERNEL_BUILD_DIR}" M="${DRIVER_DIR}" clean   2>/dev/null || true
+make -C "${KERNEL_BUILD_DIR}" M="${DRIVER_DIR}" modules
+make -C "${KERNEL_BUILD_DIR}" M="${DRIVER_DIR}" modules_install
+
+# =====================================================================
+# [3/9] Generate and compile device-tree overlay
+# =====================================================================
 
 echo "[3/9] Writing and compiling overlay"
+
 cat > "${OVERLAYS_DIR}/inland-ili9481-overlay.dts" <<EOF
 /dts-v1/;
 /plugin/;
@@ -208,17 +190,18 @@ cat > "${OVERLAYS_DIR}/inland-ili9481-overlay.dts" <<EOF
     fragment@0 {
         target-path = "/";
         __overlay__ {
-            inland_ili9481: inland_ili9481@0 {
-                compatible = "ilitek,ili9481";
-                reg = <0>;
-                buswidth = <16>;
+            inland_tft35: ili9481@0 {
+                compatible = "inland,ili9481-gpio";
+                status     = "okay";
+
                 rotate = <${ROTATE}>;
-                fps = <${FPS}>;
+                fps    = <${FPS}>;
 
-                reset-gpios = <&gpio 23 0>;
-                dc-gpios    = <&gpio 22 0>;
+                rst-gpios = <&gpio 27 1>;
+                dc-gpios  = <&gpio 22 0>;
+                wr-gpios  = <&gpio 17 1>;
 
-                gpios = <
+                data-gpios = <
                     &gpio  7 0
                     &gpio  8 0
                     &gpio 25 0
@@ -232,8 +215,8 @@ cat > "${OVERLAYS_DIR}/inland-ili9481-overlay.dts" <<EOF
                     &gpio 16 0
                     &gpio 20 0
                     &gpio 21 0
-                    &gpio 5  0
-                    &gpio 6  0
+                    &gpio  5 0
+                    &gpio  6 0
                     &gpio 13 0
                     &gpio 19 0
                 >;
@@ -247,15 +230,24 @@ dtc -@ -I dts -O dtb \
     -o "${OVERLAYS_DIR}/inland-ili9481-overlay.dtbo" \
     "${OVERLAYS_DIR}/inland-ili9481-overlay.dts"
 
+# =====================================================================
+# [4/9] Update module dependencies and autoload
+# =====================================================================
+
 echo "[4/9] Updating module dependencies and load hints"
 depmod -a
+
 cat > /etc/modules-load.d/inland-tft35.conf <<'EOF'
-fbtft
-fb_ili9481
+ili9481-gpio
 EOF
+
 if [ "$TOUCH" -eq 1 ]; then
     ensure_line /etc/modules-load.d/inland-tft35.conf "ads7846"
 fi
+
+# =====================================================================
+# [5/9] Clean stale config entries
+# =====================================================================
 
 echo "[5/9] Cleaning old config entries"
 remove_lines "$CONFIG" \
@@ -269,14 +261,18 @@ remove_lines "$CONFIG" \
     '/^dtoverlay=ads7846,/d' \
     '/^dtoverlay=xpt2046,/d'
 
+# =====================================================================
+# [6/9] Configure boot display and touch
+# =====================================================================
+
 echo "[6/9] Configuring boot display and touch"
-sed -i 's/^dtoverlay=vc4-kms-v3d/#dtoverlay=vc4-kms-v3d/' "$CONFIG"
-sed -i 's/^dtoverlay=vc4-fkms-v3d/#dtoverlay=vc4-fkms-v3d/' "$CONFIG"
-sed -i 's/^display_auto_detect=1/#display_auto_detect=1/' "$CONFIG"
+
+sed -i 's/^dtoverlay=vc4-kms-v3d/#dtoverlay=vc4-kms-v3d/'     "$CONFIG"
+sed -i 's/^dtoverlay=vc4-fkms-v3d/#dtoverlay=vc4-fkms-v3d/'   "$CONFIG"
+sed -i 's/^display_auto_detect=1/#display_auto_detect=1/'       "$CONFIG"
 
 if ! grep -q '^\[all\]$' "$CONFIG"; then
-    echo "" >> "$CONFIG"
-    echo "[all]" >> "$CONFIG"
+    printf '\n[all]\n' >> "$CONFIG"
 fi
 
 cat >> "$CONFIG" <<'EOF'
@@ -295,15 +291,25 @@ cat >> "$CONFIG" <<'EOF'
 # END inland-tft35
 EOF
 
+# =====================================================================
+# [7/9] Configure fbcon mapping
+# =====================================================================
+
 echo "[7/9] Configuring fbcon mapping"
-sed -i 's/ fbcon=map:[^ ]*//g' "$CMDLINE"
-sed -i 's/  */ /g' "$CMDLINE"
-sed -i 's/[[:space:]]*$//' "$CMDLINE"
+
+sed -i 's/ fbcon=map:[^ ]*//g'  "$CMDLINE"
+sed -i 's/  */ /g'              "$CMDLINE"
+sed -i 's/[[:space:]]*$//'      "$CMDLINE"
 if ! grep -q 'fbcon=map:' "$CMDLINE"; then
     sed -i "1s/$/ fbcon=map:${FB_MAP}/" "$CMDLINE"
 fi
 
+# =====================================================================
+# [8/9] X11 framebuffer and touch configuration
+# =====================================================================
+
 echo "[8/9] Installing X11 framebuffer and touch configuration"
+
 mkdir -p /etc/X11/xorg.conf.d
 cat > /etc/X11/xorg.conf.d/99-inland-fbdev.conf <<'EOF'
 Section "Device"
@@ -328,8 +334,13 @@ else
     rm -f /etc/X11/xorg.conf.d/99-inland-touch.conf
 fi
 
+# =====================================================================
+# [9/9] Boot-time framebuffer mapping service
+# =====================================================================
+
 echo "[9/9] Enabling boot mapping service and selecting X11"
-cat > /usr/local/bin/inland-tft35-boot <<'EOF'
+
+cat > /usr/local/bin/inland-tft35-boot <<'BOOTSCRIPT'
 #!/bin/bash
 set -euo pipefail
 
@@ -355,9 +366,10 @@ if command -v con2fbmap >/dev/null 2>&1; then
 fi
 
 if [ -f /etc/X11/xorg.conf.d/99-inland-fbdev.conf ]; then
-    sed -i "s#Option \"fbdev\" \"/dev/fb[0-9]*\"#Option \"fbdev\" \"/dev/fb${fb_number}\"#" /etc/X11/xorg.conf.d/99-inland-fbdev.conf
+    sed -i "s#Option \"fbdev\" \"/dev/fb[0-9]*\"#Option \"fbdev\" \"/dev/fb${fb_number}\"#" \
+        /etc/X11/xorg.conf.d/99-inland-fbdev.conf
 fi
-EOF
+BOOTSCRIPT
 chmod 755 /usr/local/bin/inland-tft35-boot
 
 cat > /etc/systemd/system/inland-tft35-boot.service <<'EOF'
@@ -384,6 +396,10 @@ if command -v raspi-config >/dev/null 2>&1; then
         raspi-config nonint do_wayland W1 || true
     fi
 fi
+
+# =====================================================================
+# Done
+# =====================================================================
 
 echo
 echo "Install complete."
