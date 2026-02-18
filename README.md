@@ -1,272 +1,228 @@
-# ILI9481 DRM/KMS Display Driver
+# Inland TFT35 / MPI3501 Display Driver for Raspberry Pi
 
-A native Linux DRM/KMS driver for SPI-connected display panels using the
-**Ilitek ILI9481** controller (320×480, 16-bit RGB565). This is an
-out-of-tree replacement for the removed `fbtft` driver, targeting
-Raspberry Pi but usable on any Linux SPI host with kernel ≥ 6.2.
+Configuration and installer for the **Inland TFT35" Touch Shield**
+(MicroCenter) and compatible **MPI3501 / Waveshare 3.5" LCD (A)** clone
+displays on Raspberry Pi.
 
-## Features
+> **No custom kernel module is needed.** This repository uses the built-in
+> `piscreen` device-tree overlay and `fb_ili9486` (fbtft) driver that ship
+> with stock Raspberry Pi OS.
 
-- Full DRM/KMS device (`/dev/dri/card*`) — works with Wayland, X11, Plymouth
-- Legacy fbdev emulation (`/dev/fb*`) via `drm_fbdev_generic`
-- Hardware rotation (0°, 90°, 180°, 270°)
-- Optional backlight integration
-- DKMS support — module rebuilds automatically on kernel upgrades
-- Device Tree overlay with runtime parameter overrides
+## Hardware
 
-## Supported Hardware
+The Inland TFT35 is a 480×320 ILI9486 SPI LCD with an XPT2046 resistive
+touch controller. The LCD is driven through **74HC595 shift registers** —
+the Pi never communicates directly with the ILI9486 controller.
 
-| Board                 | Status                              |
-| --------------------- | ----------------------------------- |
-| Raspberry Pi 5        | ✅ Tested                           |
-| Raspberry Pi 4B       | ✅ Tested                           |
-| Raspberry Pi 3B+      | ✅ Tested                           |
-| Raspberry Pi Zero 2W  | ✅ Expected to work                 |
-| Other Linux SPI hosts | Should work with correct DT binding |
+| Component | Controller                   | Interface                            |
+| --------- | ---------------------------- | ------------------------------------ |
+| Display   | ILI9486                      | SPI0 CE0 via 74HC595 shift registers |
+| Touch     | XPT2046 (ADS7846-compatible) | SPI0 CE1                             |
 
-**Kernel requirement:** ≥ 6.2 (uses `drm_gem_dma_helper.h` and
-`DRM_MIPI_DBI_SIMPLE_DISPLAY_PIPE_FUNCS`)
+### Pin Mapping (40-pin header)
 
-## Install (pre-built — no compiling needed)
+| Signal    | RPi GPIO | Physical Pin | Notes                        |
+| --------- | -------- | ------------ | ---------------------------- |
+| SPI MOSI  | GPIO 10  | 19           | Data to display + touch      |
+| SPI MISO  | GPIO 9   | 21           | Touch data back to Pi        |
+| SPI SCLK  | GPIO 11  | 23           | SPI clock                    |
+| SPI CE0   | GPIO 8   | 24           | Display chip select          |
+| SPI CE1   | GPIO 7   | 26           | Touch chip select            |
+| DC        | GPIO 24  | 18           | Data/Command select          |
+| RST       | GPIO 25  | 22           | Display reset                |
+| Touch IRQ | GPIO 17  | 11           | Touch interrupt (active low) |
+| LED       | GPIO 22  | 15           | Backlight enable             |
+| 5V        | —        | 2            | Power                        |
+| GND       | —        | 6            | Ground                       |
 
-The easiest way to install. Pre-built drivers for Raspberry Pi (arm64) are
-available from the
-[GitHub Actions](https://github.com/kyleweishaupt/ILI9481-driver/actions)
-build artifacts.
+> **Warning:** The old `ili9481` custom driver in this repository used
+> incorrect GPIO pins (DC=GPIO22, RST=GPIO27). The correct pins for this
+> hardware are DC=GPIO24, RST=GPIO25, matching the `piscreen` overlay.
 
-1. Go to the latest successful **Build ILI9481 Kernel Module** workflow run
-2. Download the **ili9481-arm64-rpi-6.12.y** artifact (zip file)
-3. Copy the zip to your Raspberry Pi and run:
+## Supported Boards
 
-```bash
-unzip ili9481-arm64-rpi-6.12.y.zip
-sudo bash install.sh
-sudo reboot
-```
+| Board                | Status                                 |
+| -------------------- | -------------------------------------- |
+| Raspberry Pi 3B/3B+  | ✅ Tested                              |
+| Raspberry Pi 4B      | ✅ Expected                            |
+| Raspberry Pi Zero 2W | ✅ Expected                            |
+| Raspberry Pi 5       | ⚠️ May need kernel ≥ 6.6 fbtft support |
 
-The install script copies the kernel module and device-tree overlay to the
-correct locations and adds `dtoverlay=ili9481` to `/boot/config.txt`
-automatically.
+**OS requirement:** Raspberry Pi OS Bookworm or later (with `piscreen.dtbo`
+in the overlays directory).
 
-> **Note:** The pre-built module is compiled against a specific kernel
-> version. If your running kernel doesn't match, you may need to build
-> from source instead (see Quick Start below) or use DKMS.
-
-## Wiring
-
-Default pin assignment (matches the included device-tree overlay):
-
-| Signal    | RPi GPIO | Physical Pin | Display Pin        |
-| --------- | -------- | ------------ | ------------------ |
-| SPI MOSI  | GPIO 10  | 19           | SDA / SDI          |
-| SPI SCLK  | GPIO 11  | 23           | SCL / SCK          |
-| SPI CE0   | GPIO 8   | 24           | CS                 |
-| DC        | GPIO 22  | 15           | DC / RS            |
-| RESET     | GPIO 27  | 13           | RST                |
-| GND       | —        | 6            | GND                |
-| 3.3 V     | —        | 1            | VCC                |
-| Backlight | —        | —            | LED (3.3 V or PWM) |
-
-> **Tip:** If your panel has a separate **LED** pin for the backlight,
-> connect it to 3.3 V for always-on, or to a GPIO for software control
-> (add a `backlight` phandle in the device-tree).
-
-## Quick Start (on-device build)
+## Installation
 
 ```bash
-# Install build dependencies
-sudo apt-get install -y raspberrypi-kernel-headers build-essential \
-  device-tree-compiler git
-
-# Clone the repository
 git clone https://github.com/kyleweishaupt/ILI9481-driver.git
 cd ILI9481-driver
-
-# Build the module and device-tree overlay
-make
-
-# Install (copies ili9481.ko + ili9481.dtbo)
-sudo make install
-
-# Enable the overlay
-echo "dtoverlay=ili9481" | sudo tee -a /boot/config.txt
-
-# Reboot
+sudo ./install.sh
 sudo reboot
 ```
 
-After reboot the display should show the kernel console. Verify with:
+### Options
+
+| Option           | Default  | Description                                      |
+| ---------------- | -------- | ------------------------------------------------ |
+| `--speed=HZ`     | 16000000 | SPI clock frequency (safe: 16 MHz, max: ~32 MHz) |
+| `--rotate=DEG`   | 270      | Display rotation (0, 90, 180, 270)               |
+| `--fps=N`        | 30       | Framerate hint                                   |
+| `--no-touch`     | —        | Skip touchscreen configuration                   |
+| `--overlay=NAME` | piscreen | Overlay name (fallback: waveshare35a)            |
+
+Example with custom options:
 
 ```bash
-dmesg | grep ili9481
-ls /dev/dri/card*
-cat /sys/class/drm/card*/status
+sudo ./install.sh --speed=24000000 --rotate=90
 ```
 
-## Cross-Compilation (e.g. from x86 host)
+### What the installer does
 
-```bash
-# Install cross-compiler
-sudo apt-get install -y gcc-aarch64-linux-gnu device-tree-compiler
+1. **Cleans old artifacts** from any previous `ili9481` DKMS driver
+2. **Verifies** the `piscreen.dtbo` overlay exists in the boot partition
+3. **Configures `/boot/firmware/config.txt`:**
+   - Enables SPI (`dtparam=spi=on`)
+   - Comments out `vc4-kms-v3d` (fbtft needs legacy framebuffers)
+   - Adds `disable_fw_kms_setup=1`
+   - Adds `dtoverlay=piscreen,speed=...,rotate=...,fps=...`
+4. **Cleans `/boot/firmware/cmdline.txt`** (removes `splash` and stale `fbcon=map:`)
+5. **Creates a systemd service** (`inland-tft35-display.service`) that at
+   boot finds the fbtft framebuffer, rebinds fbcon, and updates the X11 config
+6. **Installs `xserver-xorg-video-fbdev`** and creates X11 config
+   (`/etc/X11/xorg.conf.d/99-spi-display.conf`) using the `fbdev` driver
+7. **Installs `xserver-xorg-input-evdev`** and creates touch config
+   (`/etc/X11/xorg.conf.d/99-touch-calibration.conf`)
+   with rotation-appropriate calibration matrix + udev rule
 
-# Point KDIR at a prepared Raspberry Pi kernel tree
-make KDIR=~/rpi-kernel ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
-```
-
-The resulting `ili9481.ko` and `ili9481.dtbo` can be copied to the Pi.
-
-## DKMS Installation
-
-DKMS automatically rebuilds the module when the kernel is upgraded:
-
-```bash
-# Install DKMS
-sudo apt-get install -y dkms
-
-# Register, build, and install via DKMS
-sudo make install-dkms
-
-# To remove later:
-sudo make uninstall-dkms
-```
-
-## Device Tree Configuration
-
-### Basic (add to `/boot/config.txt`)
-
-```ini
-dtoverlay=ili9481
-```
-
-### With Optional Parameters
-
-```ini
-dtoverlay=ili9481,speed=12000000,rotate=90,dc=22,reset=27,panel=0,cs=0
-```
-
-| Parameter | Default  | Description                                         |
-| --------- | -------- | --------------------------------------------------- |
-| `speed`   | 12000000 | SPI clock frequency in Hz                           |
-| `rotate`  | 0        | Display rotation (0, 90, 180, 270)                  |
-| `dc`      | 22       | GPIO number for Data/Command pin                    |
-| `reset`   | 27       | GPIO number for Reset pin                           |
-| `panel`   | 0        | Controller profile: 0=ILI9481, 1=ILI9486, 2=ILI9488 |
-| `cs`      | 0        | SPI chip-select line: 0=CE0, 1=CE1                  |
-
-### Touchscreen (XPT2046)
-
-If your display includes a resistive touch panel driven by an XPT2046
-controller on SPI0 CE1, uncomment `fragment@3` in `ili9481-overlay.dts`
-or add a separate overlay. A standalone touch overlay is provided at
-[`xpt2046-overlay.dts`](xpt2046-overlay.dts) for reference.
-
-The default touch wiring assumes:
-
-| Signal  | GPIO    | Physical Pin |
-| ------- | ------- | ------------ |
-| IRQ     | GPIO 25 | 22           |
-| SPI CE1 | GPIO 7  | 26           |
-
-## Rotation
-
-Set the `rotation` device-tree property (0, 90, 180, 270). The driver
-translates this to the ILI9481 MADCTL register:
-
-| Rotation | MADCTL | Effective Resolution  |
-| -------- | ------ | --------------------- |
-| 0°       | 0x0A   | 320 × 480 (portrait)  |
-| 90°      | 0x28   | 480 × 320 (landscape) |
-| 180°     | 0x09   | 320 × 480 (portrait)  |
-| 270°     | 0x2B   | 480 × 320 (landscape) |
-
-## Testing & Validation
-
-After installation, verify the driver is working:
-
-```bash
-# Check kernel log
-dmesg | grep -i ili9481
-
-# List DRM devices
-ls -l /dev/dri/
-
-# Show modes (install libdrm-tests if needed)
-sudo apt-get install -y libdrm-tests
-modetest -M ili9481
-
-# Display a test pattern (fill screen red via fbdev)
-sudo apt-get install -y fbset
-cat /dev/urandom | head -c $((320*480*2)) > /dev/fb0
-
-# Or use the included test script
-sudo ./scripts/test-display.sh
-```
-
-## Migrating from fbtft
-
-If you previously used the `fbtft_device` or `fb_ili9481` kernel module:
-
-1. Remove any `fbtft`-related overlays or `dtoverlay=` lines from
-   `/boot/config.txt`
-2. Blacklist the old module: `echo "blacklist fb_ili9481" | sudo tee /etc/modprobe.d/blacklist-fbtft.conf`
-3. Install this driver (see Quick Start above)
-4. Applications that used `/dev/fb0` will continue to work via the
-   DRM fbdev compatibility layer
-5. For modern applications, use the DRM/KMS device directly
-   (`/dev/dri/card*`)
-
-## Uninstalling
-
-A dedicated uninstall script cleanly reverses all changes made by the
-installer:
+## Uninstallation
 
 ```bash
 sudo ./uninstall.sh
 sudo reboot
 ```
 
-This removes the DKMS module, device-tree overlays, boot config entries,
-X11 display configuration, touchscreen settings, and the systemd helper
-service. SPI and DRM/KMS settings are preserved since other hardware may
-depend on them.
+This reverses all changes: removes the systemd service, X11/touch configs,
+udev rules, and boot config entries. It also re-enables `vc4-kms-v3d` for
+HDMI output and cleans up any leftover `ili9481` DKMS artifacts.
+
+`dtparam=spi=on` is intentionally left intact since other hardware may
+depend on it.
+
+## Testing
+
+```bash
+sudo ./scripts/test-display.sh            # Run all checks
+sudo ./scripts/test-display.sh --pattern  # Also paint RGBW test bars
+```
+
+The test script checks:
+
+- `fb_ili9486` / fbtft module loaded
+- Framebuffer device exists with correct name
+- Kernel log messages present
+- ADS7846 touch input device registered
+- fbcon mapped to the SPI display
+- `config.txt` overlay correctly configured
+
+### Manual verification
+
+```bash
+# Module loaded?
+lsmod | grep fb_ili9486
+
+# Framebuffer exists?
+ls /dev/fb*
+
+# Driver messages?
+dmesg | grep ili9486
+
+# Touch device?
+cat /proc/bus/input/devices | grep -A5 ADS7846
+
+# Touch events?
+sudo apt-get install -y evtest
+sudo evtest  # select ADS7846 device
+```
+
+## Touch Calibration
+
+The installer sets a default calibration matrix based on the `--rotate`
+value. If touch coordinates are misaligned:
+
+```bash
+sudo apt-get install -y xinput-calibrator
+DISPLAY=:0 xinput_calibrator
+```
+
+Then update the matrix in `/etc/X11/xorg.conf.d/99-touch-calibration.conf`.
+
+### Calibration matrices by rotation
+
+| Rotation | Matrix                |
+| -------- | --------------------- |
+| 0°       | `1 0 0 0 1 0 0 0 1`   |
+| 90°      | `0 1 0 -1 0 1 0 0 1`  |
+| 180°     | `-1 0 1 0 -1 1 0 0 1` |
+| 270°     | `0 -1 1 1 0 0 0 0 1`  |
+
+## Troubleshooting
+
+| Symptom                   | Cause                      | Fix                                                            |
+| ------------------------- | -------------------------- | -------------------------------------------------------------- |
+| White/blank screen        | `vc4-kms-v3d` still active | Re-run `sudo ./install.sh` — it comments out `vc4-kms-v3d`     |
+| White/blank screen        | Wrong overlay              | Try `sudo ./install.sh --overlay=waveshare35a`                 |
+| No framebuffer device     | Overlay not loaded         | Check `config.txt` has `dtoverlay=piscreen`; reboot            |
+| Console on HDMI not SPI   | fbcon not rebound          | `systemctl status inland-tft35-display.service`                |
+| Touch not working         | Wiring or overlay issue    | Check IRQ=GPIO17, CE1 wiring; verify `piscreen` includes touch |
+| Touch coordinates wrong   | Needs calibration          | Run `xinput_calibrator` — see Touch Calibration above          |
+| Slow/laggy display        | SPI speed too high         | Lower speed: `sudo ./install.sh --speed=12000000`              |
+| `fb_ili9486` not in lsmod | fbtft blacklisted          | Remove `/etc/modprobe.d/*blacklist*fbtft*`; reboot             |
+
+## Migrating from the old ili9481 driver
+
+If you previously used the custom `ili9481` kernel module from this
+repository:
+
+1. The installer **automatically cleans up** old DKMS modules, overlays,
+   blacklists, systemd services, and config entries
+2. Simply run `sudo ./install.sh` — it handles the full migration
+3. The old driver used incorrect GPIO pins (DC=22, RST=27) and required
+   a custom kernel module. The new setup uses the correct pins (DC=24,
+   RST=25) via the built-in `piscreen` overlay
 
 ## Repository Structure
 
 ```
-├── ili9481.c               # Kernel module source (DRM/KMS driver)
-├── ili9481-overlay.dts     # Device Tree overlay source
-├── xpt2046-overlay.dts     # XPT2046 touchscreen overlay source
-├── Makefile                # Build system (module + overlay + install)
-├── Kconfig                 # Kernel config entry
-├── dkms.conf               # DKMS configuration
-├── install.sh              # One-command installer
-├── uninstall.sh            # One-command uninstaller
+├── install.sh              # Configuration installer
+├── uninstall.sh            # Configuration uninstaller
 ├── scripts/
-│   └── test-display.sh     # Display test script
+│   └── test-display.sh     # Display/touch validation script
+├── .github/
+│   └── workflows/
+│       └── lint.yml        # ShellCheck CI
 └── README.md               # This file
 ```
 
-## Troubleshooting
+## How it works
 
-| Symptom                                     | Possible Cause                       | Fix                                                                                                                                              |
-| ------------------------------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| White/blank screen                          | Init sequence skipped (MISO float)   | Update driver to v1.1+; re-run `sudo ./install.sh` and reboot                                                                                    |
-| White screen persists after update          | Old module still loaded (DKMS cache) | `sudo ./uninstall.sh && sudo ./install.sh && sudo reboot`                                                                                        |
-| White/blank screen after install            | Stale/missing .dtbo overlay          | Re-run `sudo ./install.sh` to recompile overlays from .dts sources                                                                               |
-| No boot logo on SPI display                 | Plymouth `splash` in cmdline.txt     | Re-run `sudo ./install.sh` (it removes `splash`; fbcon mapping is handled dynamically by `ili9481-display.service`)                              |
-| Console appears on HDMI, not SPI display    | fbcon not rebound to ILI9481 fb      | Re-run `sudo ./install.sh`; verify `ili9481-display.service` is enabled and started                                                              |
-| `modprobe: FATAL: Module ili9481 not found` | Module not installed or wrong kernel | Run `sudo ./install.sh` or `sudo make install-dkms`                                                                                              |
-| Colors inverted                             | Panel-specific inversion behavior    | Check your panel datasheet; adjust inversion command in `ili9481.c` if needed                                                                    |
-| `No such device` on `/dev/fb0`              | Overlay not loaded                   | Verify `dtoverlay=ili9481` is in `/boot/config.txt` and reboot                                                                                   |
-| Garbled display                             | Incorrect rotation                   | Try `rotate=0` (default) first                                                                                                                   |
-| Touch not working                           | XPT2046 overlay not loaded           | Verify `dtoverlay=xpt2046` is in `/boot/config.txt`; check wiring                                                                                |
-| Touch coordinates misaligned                | Needs calibration                    | Run `DISPLAY=:0 xinput_calibrator` and update CalibrationMatrix                                                                                  |
-| Desktop/Wayland on HDMI, not SPI display    | Wayland compositor using card0 (vc4) | Re-run install script; verify `WLR_DRM_DEVICES=/dev/dri/card1` in `/etc/environment.d/99-ili9481.conf` and `/etc/labwc/environment`, then reboot |
-| Desktop/X11 on HDMI, not SPI display        | X11 modesetting using wrong DRM card | Re-run install script; verify `Option "kmsdev" "/dev/dri/card1"` in `/etc/X11/xorg.conf.d/99-ili9481.conf`                                       |
-| Mouse/keyboard laggy                        | SPI speed too high causing CPU load  | Lower `speed` parameter in `/boot/config.txt` overlay line                                                                                       |
+Unlike the previous approach (custom out-of-tree DRM/KMS kernel module),
+this setup relies entirely on drivers and overlays already built into the
+Raspberry Pi OS kernel:
+
+- **`piscreen` overlay**: Configures SPI0 with the ILI9486 fbtft driver
+  and ADS7846 touch controller using the correct GPIO pins for MPI3501
+  hardware (RST=25, DC=24, LED=22, IRQ=17)
+- **`fb_ili9486` module**: Part of the fbtft staging driver tree, handles
+  the ILI9486 initialization sequence and SPI framebuffer updates
+- **`ads7846` module**: Standard kernel touchscreen driver for XPT2046
+
+The `vc4-kms-v3d` overlay must be disabled because fbtft creates a legacy
+framebuffer device (`/dev/fbN`) which is incompatible with the DRM/KMS
+graphics stack. This means GPU-accelerated HDMI output is not available
+when the SPI display is active.
 
 ## License
 
-This driver is licensed under **GPL-2.0-only**. See the
+This project is licensed under **GPL-2.0-only**. See the
 [SPDX identifier](https://spdx.org/licenses/GPL-2.0-only.html) in each
 source file.

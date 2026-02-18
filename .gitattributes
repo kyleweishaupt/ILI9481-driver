@@ -5,14 +5,9 @@
 # Explicitly mark shell scripts
 *.sh text eol=lf
 
-# Explicitly mark source files
-*.c text eol=lf
-*.h text eol=lf
-*.dts text eol=lf
-Makefile text eol=lf
-Kconfig text eol=lf
-dkms.conf text eol=lf
+# Explicitly mark markdown
+*.md text eol=lf
 
-# Binary files
-*.dtbo binary
-*.ko binary
+# YAML (CI workflows)
+*.yml text eol=lf
+*.yaml text eol=lf

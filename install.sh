@@ -1,18 +1,54 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0-only
 #
-# install.sh — Install ILI9481 DRM display driver
+# install.sh — Install Inland TFT35 / MPI3501 display + touch configuration
 #
-# Usage:  sudo ./install.sh
+# Usage:  sudo ./install.sh [OPTIONS]
 #
-# This script installs the ILI9481 kernel module via DKMS so it is
-# compiled against your running kernel (correct symbol versions) and
-# automatically rebuilt on kernel upgrades.  Pre-compiled device-tree
-# overlays are installed directly.  The script also blacklists the
-# conflicting fbtft staging driver, enables SPI, and configures the
-# display overlay to load on boot.
+# This script configures Raspberry Pi OS to use the built-in piscreen
+# device-tree overlay and fb_ili9486 (fbtft) driver for the Inland TFT35"
+# Touch Shield (MicroCenter) and compatible MPI3501 / Waveshare 3.5" (A)
+# clone displays.
+#
+# No custom kernel module is compiled — the driver is already built into
+# the stock kernel.
+#
+# Options:
+#   --speed=HZ       SPI clock frequency (default: 16000000)
+#   --rotate=DEG     Display rotation: 0, 90, 180, 270 (default: 270)
+#   --fps=N          Framerate hint (default: 30)
+#   --no-touch       Skip touchscreen configuration
+#   --overlay=NAME   Overlay to use (default: piscreen; fallback: waveshare35a)
 
 set -euo pipefail
+
+# ── Defaults ─────────────────────────────────────────────────────────
+
+SPI_SPEED=16000000
+ROTATE=270
+FPS=30
+TOUCH=1
+OVERLAY="piscreen"
+SERVICE_NAME="inland-tft35-display"
+
+# ── Parse arguments ──────────────────────────────────────────────────
+
+for arg in "$@"; do
+    case "$arg" in
+        --speed=*)   SPI_SPEED="${arg#*=}" ;;
+        --rotate=*)  ROTATE="${arg#*=}" ;;
+        --fps=*)     FPS="${arg#*=}" ;;
+        --no-touch)  TOUCH=0 ;;
+        --overlay=*) OVERLAY="${arg#*=}" ;;
+        --help|-h)
+            sed -n '2,/^$/s/^# //p' "$0"
+            exit 0 ;;
+        *)
+            echo "Unknown option: $arg"
+            echo "Run with --help for usage."
+            exit 1 ;;
+    esac
+done
 
 # ── Checks ───────────────────────────────────────────────────────────
 
@@ -21,36 +57,16 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-DTBO="$SCRIPT_DIR/ili9481.dtbo"
-TOUCH_DTBO="$SCRIPT_DIR/xpt2046.dtbo"
-DTS_SRC="$SCRIPT_DIR/ili9481-overlay.dts"
-TOUCH_DTS_SRC="$SCRIPT_DIR/xpt2046-overlay.dts"
-
-# Source files for DKMS
-SRC_FILES=(ili9481.c Makefile Kconfig dkms.conf)
-for f in "$SCRIPT_DIR/ili9481.c" "$SCRIPT_DIR/dkms.conf"; do
-    if [ ! -f "$f" ]; then
-        echo "Error: Required file not found: $f"
-        exit 1
-    fi
-done
-
-# At least one of .dtbo or .dts must exist for the display overlay
-if [ ! -f "$DTBO" ] && [ ! -f "$DTS_SRC" ]; then
-    echo "Error: Neither ili9481.dtbo nor ili9481-overlay.dts found"
-    exit 1
-fi
-
-# ── Parse dkms.conf ──────────────────────────────────────────────────
-
-DKMS_NAME="ili9481"
-DKMS_VERSION=$(sed -n 's/^PACKAGE_VERSION="\(.*\)"/\1/p' "$SCRIPT_DIR/dkms.conf")
-DKMS_SRC="/usr/src/${DKMS_NAME}-${DKMS_VERSION}"
+# Validate rotation
+case "$ROTATE" in
+    0|90|180|270) ;;
+    *)
+        echo "Error: Invalid rotation '$ROTATE'. Must be 0, 90, 180, or 270."
+        exit 1 ;;
+esac
 
 # ── Determine paths ─────────────────────────────────────────────────
 
-KVER="$(uname -r)"
 OVERLAYS_DIR="/boot/overlays"
 CONFIG="/boot/config.txt"
 CMDLINE="/boot/cmdline.txt"
@@ -63,195 +79,276 @@ if [ -d "/boot/firmware/overlays" ]; then
 fi
 
 STEP=1
-TOTAL=9
+TOTAL=8
+[ "$TOUCH" -eq 0 ] && TOTAL=7
 
-echo "ILI9481 Display Driver Installer"
-echo "================================"
+echo "Inland TFT35 Display Installer"
+echo "==============================="
 echo ""
-echo "Kernel:    $KVER"
-echo "DKMS:      ${DKMS_NAME}/${DKMS_VERSION}"
-echo "Overlay:   $OVERLAYS_DIR/ili9481.dtbo"
-echo "Config:    $CONFIG"
+echo "Overlay:   ${OVERLAY}"
+echo "SPI speed: ${SPI_SPEED} Hz"
+echo "Rotation:  ${ROTATE}°"
+echo "FPS:       ${FPS}"
+echo "Touch:     $([ "$TOUCH" -eq 1 ] && echo 'yes' || echo 'no')"
+echo "Config:    ${CONFIG}"
 echo ""
 
-# ── 1. Blacklist conflicting fbtft staging driver ────────────────────
+# ── 1. Clean old artifacts from previous ili9481 driver ──────────────
 
-echo "[$STEP/$TOTAL] Blacklisting conflicting fbtft staging driver ..."
-BLACKLIST_CONF="/etc/modprobe.d/ili9481-blacklist.conf"
-cat > "$BLACKLIST_CONF" <<'EOF'
-# Prevent the old fbtft staging driver from grabbing the ILI9481 device.
-blacklist fb_ili9481
-blacklist fbtft
-EOF
-echo "  Created $BLACKLIST_CONF"
-STEP=$((STEP + 1))
+echo "[$STEP/$TOTAL] Cleaning old ili9481 driver artifacts ..."
 
-# ── 2. Install dependencies ─────────────────────────────────────────
-
-echo "[$STEP/$TOTAL] Installing DKMS, kernel headers, and device-tree compiler ..."
-apt-get update -qq
-apt-get install -y -qq dkms device-tree-compiler raspberrypi-kernel-headers 2>/dev/null \
-  || apt-get install -y -qq dkms device-tree-compiler "linux-headers-${KVER}"
-echo "  Done"
-STEP=$((STEP + 1))
-
-# ── Compile device-tree overlays if needed ───────────────────────────
-
-echo "[$STEP/$TOTAL] Compiling device-tree overlays ..."
-if [ -f "$DTS_SRC" ]; then
-    # Suppress dtc warnings (phandle refs in overlays) but show errors
-    if ! dtc -@ -Hepapr -I dts -O dtb -o "$DTBO" "$DTS_SRC" 2>/dev/null; then
-        echo "  Error: dtc failed to compile ili9481-overlay.dts"
-        echo "  Trying without -Hepapr..."
-        dtc -@ -I dts -O dtb -o "$DTBO" "$DTS_SRC" 2>/dev/null || {
-            echo "  Error: device-tree compilation failed. Check $DTS_SRC"
-            exit 1
-        }
+# Remove old DKMS module
+if command -v dkms >/dev/null 2>&1; then
+    if dkms status "ili9481" 2>/dev/null | grep -q .; then
+        for ver in $(dkms status "ili9481" 2>/dev/null \
+                     | sed -n 's/.*\/\([^,]*\),.*/\1/p' | sort -u); do
+            dkms remove "ili9481/${ver}" --all 2>/dev/null || true
+            echo "  Removed DKMS ili9481/${ver}"
+        done
     fi
-    if [ ! -f "$DTBO" ]; then
-        echo "  Error: ili9481.dtbo was not created"
-        exit 1
-    fi
-    echo "  Compiled ili9481-overlay.dts → ili9481.dtbo"
-else
-    if [ ! -f "$DTBO" ]; then
-        echo "  Error: No .dts source or pre-compiled .dtbo found"
-        exit 1
-    fi
-    echo "  Using pre-compiled ili9481.dtbo"
 fi
-if [ -f "$TOUCH_DTS_SRC" ]; then
-    dtc -@ -Hepapr -I dts -O dtb -o "$TOUCH_DTBO" "$TOUCH_DTS_SRC" 2>/dev/null \
-      || dtc -@ -I dts -O dtb -o "$TOUCH_DTBO" "$TOUCH_DTS_SRC" 2>/dev/null \
-      || echo "  Warning: could not compile xpt2046-overlay.dts (touch may not work)"
-    [ -f "$TOUCH_DTBO" ] && echo "  Compiled xpt2046-overlay.dts → xpt2046.dtbo"
-else
-    echo "  Using pre-compiled xpt2046.dtbo (or not present)"
-fi
-STEP=$((STEP + 1))
-
-# ── 3. Build & install via DKMS ──────────────────────────────────────
-
-echo "[$STEP/$TOTAL] Building kernel module via DKMS ..."
-# Remove any previous registration
-if dkms status "${DKMS_NAME}/${DKMS_VERSION}" 2>/dev/null | grep -q .; then
-    dkms remove "${DKMS_NAME}/${DKMS_VERSION}" --all 2>/dev/null || true
-fi
-# Copy source to DKMS tree
-mkdir -p "$DKMS_SRC"
-for f in "${SRC_FILES[@]}"; do
-    [ -f "$SCRIPT_DIR/$f" ] && cp -f "$SCRIPT_DIR/$f" "$DKMS_SRC/"
+# Remove DKMS source trees
+for d in /usr/src/ili9481-*/; do
+    [ -d "$d" ] && rm -rf "$d" && echo "  Removed $d"
 done
-# Build and install in one step
-dkms install "${DKMS_NAME}/${DKMS_VERSION}" -k "$KVER"
-echo "  Module built and installed for kernel $KVER"
-STEP=$((STEP + 1))
 
-# ── 4. Install device-tree overlays ─────────────────────────────────
+# Remove old overlays
+for f in ili9481.dtbo xpt2046.dtbo; do
+    if [ -f "$OVERLAYS_DIR/$f" ]; then
+        rm -f "$OVERLAYS_DIR/$f"
+        echo "  Removed $OVERLAYS_DIR/$f"
+    fi
+done
 
-echo "[$STEP/$TOTAL] Installing device-tree overlays ..."
-mkdir -p "$OVERLAYS_DIR"
-cp -f "$DTBO" "$OVERLAYS_DIR/ili9481.dtbo"
-if [ -f "$TOUCH_DTBO" ]; then
-    cp -f "$TOUCH_DTBO" "$OVERLAYS_DIR/xpt2046.dtbo"
-    echo "  Installed ili9481.dtbo and xpt2046.dtbo"
-else
-    echo "  Installed ili9481.dtbo (xpt2046.dtbo not found — touch skipped)"
+# Remove old blacklist that blocked fbtft (we now WANT fbtft)
+rm -f /etc/modprobe.d/ili9481-blacklist.conf 2>/dev/null && \
+    echo "  Removed /etc/modprobe.d/ili9481-blacklist.conf" || true
+
+# Remove old systemd service
+if [ -f /etc/systemd/system/ili9481-display.service ]; then
+    systemctl disable ili9481-display.service 2>/dev/null || true
+    rm -f /etc/systemd/system/ili9481-display.service
+    systemctl daemon-reload 2>/dev/null || true
+    echo "  Removed ili9481-display.service"
 fi
+
+# Remove old helper script
+rm -f /usr/local/bin/ili9481-find-card 2>/dev/null || true
+
+# Remove old X11/Wayland configs
+rm -f /etc/X11/xorg.conf.d/99-ili9481.conf 2>/dev/null || true
+rm -f /etc/environment.d/99-ili9481.conf 2>/dev/null || true
+rm -f /etc/labwc/environment 2>/dev/null || true
+
+# Remove old config.txt entries for ili9481/xpt2046
+if [ -f "$CONFIG" ]; then
+    sed -i '/^# ILI9481 SPI display driver/d' "$CONFIG"
+    sed -i '/^dtoverlay=ili9481/d' "$CONFIG"
+    sed -i '/^# XPT2046 resistive touchscreen/d' "$CONFIG"
+    sed -i '/^dtoverlay=xpt2046/d' "$CONFIG"
+    sed -i '/^# Enable DRM\/KMS (required for ILI9481 DRM driver)/d' "$CONFIG"
+    sed -i '/^# Enable SPI bus (required for ILI9481 display)/d' "$CONFIG"
+    sed -i '/^# Blacklist fbtft/d' "$CONFIG"
+fi
+
+echo "  Old artifacts cleaned"
 STEP=$((STEP + 1))
 
-# ── 5. Configure config.txt ─────────────────────────────────────────
+# ── 2. Verify overlay exists ────────────────────────────────────────
 
-echo "[$STEP/$TOTAL] Configuring $CONFIG ..."
+echo "[$STEP/$TOTAL] Verifying ${OVERLAY} overlay ..."
+DTBO_PATH="${OVERLAYS_DIR}/${OVERLAY}.dtbo"
+if [ ! -f "$DTBO_PATH" ]; then
+    echo "  Warning: ${DTBO_PATH} not found."
+    # Try fallback
+    if [ "$OVERLAY" = "piscreen" ] && [ -f "${OVERLAYS_DIR}/waveshare35a.dtbo" ]; then
+        OVERLAY="waveshare35a"
+        DTBO_PATH="${OVERLAYS_DIR}/${OVERLAY}.dtbo"
+        echo "  Falling back to waveshare35a overlay"
+    else
+        echo "  Error: No compatible overlay found in ${OVERLAYS_DIR}"
+        echo "  Expected: piscreen.dtbo or waveshare35a.dtbo"
+        echo "  Make sure you are running a stock Raspberry Pi OS kernel."
+        exit 1
+    fi
+fi
+echo "  Found ${DTBO_PATH}"
+STEP=$((STEP + 1))
+
+# ── 3. Configure config.txt ─────────────────────────────────────────
+
+echo "[$STEP/$TOTAL] Configuring ${CONFIG} ..."
 if [ -f "$CONFIG" ]; then
     changed=0
 
-    # SPI
+    # Enable SPI
     if ! grep -q "^dtparam=spi=on" "$CONFIG"; then
-        printf '\n# Enable SPI bus (required for ILI9481 display)\ndtparam=spi=on\n' >> "$CONFIG"
+        printf '\n# Enable SPI bus (required for SPI display)\ndtparam=spi=on\n' >> "$CONFIG"
         echo "  Added dtparam=spi=on"
         changed=1
     fi
 
-    # DRM/KMS
-    if ! grep -q "^dtoverlay=vc4-kms-v3d" "$CONFIG" && \
-       ! grep -q "^dtoverlay=vc4-fkms-v3d" "$CONFIG"; then
-        printf '\n# Enable DRM/KMS (required for ILI9481 DRM driver)\ndtoverlay=vc4-kms-v3d\n' >> "$CONFIG"
-        echo "  Added dtoverlay=vc4-kms-v3d"
+    # Comment out vc4-kms-v3d (fbtft needs legacy framebuffer, not KMS)
+    if grep -q "^dtoverlay=vc4-kms-v3d" "$CONFIG"; then
+        sed -i 's/^dtoverlay=vc4-kms-v3d/#dtoverlay=vc4-kms-v3d/' "$CONFIG"
+        echo "  Commented out dtoverlay=vc4-kms-v3d (fbtft requires legacy fb)"
+        changed=1
+    fi
+    if grep -q "^dtoverlay=vc4-fkms-v3d" "$CONFIG"; then
+        sed -i 's/^dtoverlay=vc4-fkms-v3d/#dtoverlay=vc4-fkms-v3d/' "$CONFIG"
+        echo "  Commented out dtoverlay=vc4-fkms-v3d (fbtft requires legacy fb)"
         changed=1
     fi
 
-    # ILI9481 overlay
-    if ! grep -q "^dtoverlay=ili9481" "$CONFIG"; then
-        printf '\n# ILI9481 SPI display driver\ndtoverlay=ili9481\n' >> "$CONFIG"
-        echo "  Added dtoverlay=ili9481"
+    # Disable firmware KMS setup
+    if ! grep -q "^disable_fw_kms_setup=1" "$CONFIG"; then
+        printf '\n# Disable firmware KMS setup (required for fbtft)\ndisable_fw_kms_setup=1\n' >> "$CONFIG"
+        echo "  Added disable_fw_kms_setup=1"
         changed=1
     fi
 
-    # XPT2046 touch overlay
-    if [ -f "$TOUCH_DTBO" ] && ! grep -q "^dtoverlay=xpt2046" "$CONFIG"; then
-        printf '# XPT2046 resistive touchscreen\ndtoverlay=xpt2046\n' >> "$CONFIG"
-        echo "  Added dtoverlay=xpt2046"
-        changed=1
-    fi
+    # Remove any existing piscreen/waveshare35a overlay lines (prevent duplicates)
+    sed -i '/^# Inland TFT35 SPI display/d' "$CONFIG"
+    sed -i "/^dtoverlay=${OVERLAY}/d" "$CONFIG"
 
-    [ "$changed" -eq 0 ] && echo "  Already configured — skipping."
+    # Add overlay with parameters
+    OVERLAY_LINE="dtoverlay=${OVERLAY},speed=${SPI_SPEED},rotate=${ROTATE},fps=${FPS}"
+    printf '\n# Inland TFT35 SPI display (fbtft / fb_ili9486)\n%s\n' "$OVERLAY_LINE" >> "$CONFIG"
+    echo "  Added ${OVERLAY_LINE}"
+    changed=1
+
+    # Collapse multiple consecutive blank lines
+    sed -i '/^$/N;/^\n$/d' "$CONFIG"
+
+    [ "$changed" -eq 0 ] && echo "  Already configured."
 else
-    echo "  Warning: $CONFIG not found — configure manually."
+    echo "  Warning: ${CONFIG} not found — configure manually."
 fi
 STEP=$((STEP + 1))
 
-# ── 6. Configure fbcon ───────────────────────────────────────────────
+# ── 4. Configure cmdline.txt ────────────────────────────────────────
 
-echo "[$STEP/$TOTAL] Configuring framebuffer console ..."
+echo "[$STEP/$TOTAL] Configuring ${CMDLINE} ..."
 if [ -f "$CMDLINE" ]; then
-    # Remove stale fbcon mapping from any previous install
+    # Remove stale fbcon mapping
     sed -i 's/ fbcon=map:[^ ]*//g' "$CMDLINE"
-    # Remove 'splash' — Plymouth only renders on HDMI/DSI, not SPI.
-    # Without this the SPI display stays blank until Plymouth exits.
+    # Remove 'splash' — Plymouth only renders on HDMI/DSI, not SPI
     sed -i 's/ splash//g' "$CMDLINE"
-    # Remove logo.nologo if present so the Raspberry Pi boot logo appears
-    sed -i 's/ logo\.nologo//g' "$CMDLINE"
-    #
-    # Do NOT hardcode fbcon=map:N in cmdline.txt.
-    #
-    # The ILI9481 fb number depends on whether vc4 creates an fbdev:
-    #   - HDMI connected → vc4 = fb0, ILI9481 = fb1 → need map:1
-    #   - No HDMI        → vc4 has no fb, ILI9481 = fb0 → need map:0
-    #
-    # The ili9481-display.service detects the correct fb at boot and
-    # remaps fbcon dynamically via /sys/class/vtconsole.
-    #
     echo "  Cleaned cmdline.txt (removed stale fbcon/splash settings)"
-    echo "  fbcon will be mapped dynamically at boot by ili9481-display.service"
+    echo "  fbcon will be mapped dynamically at boot by ${SERVICE_NAME}.service"
 else
-    echo "  Warning: $CMDLINE not found."
+    echo "  Warning: ${CMDLINE} not found."
 fi
 STEP=$((STEP + 1))
 
-# ── 7. Configure X11 to use ILI9481 as primary display ──────────────
+# ── 5. Create systemd service + helper script ───────────────────────
 
-echo "[$STEP/$TOTAL] Configuring display output ..."
+echo "[$STEP/$TOTAL] Creating boot-time display setup service ..."
+
+HELPER="/usr/local/bin/inland-tft35-setup"
+cat > "$HELPER" <<'HEOF'
+#!/bin/bash
+# Find the fbtft/ili9486 framebuffer and configure fbcon + X11 to use it.
+# Runs at boot via inland-tft35-display.service.
+set -euo pipefail
+
+TIMEOUT=30
+ELAPSED=0
+FB_DEV=""
+FB_NUM=""
+
+# Wait for the fbtft framebuffer to appear
+while [ $ELAPSED -lt $TIMEOUT ]; do
+    for fb in /sys/class/graphics/fb*; do
+        [ -d "$fb" ] || continue
+        fb_name=$(cat "$fb/name" 2>/dev/null || true)
+        if echo "$fb_name" | grep -qi "ili9486"; then
+            FB_NUM=$(basename "$fb" | sed 's/fb//')
+            FB_DEV="/dev/fb${FB_NUM}"
+            break 2
+        fi
+    done
+    sleep 1
+    ELAPSED=$((ELAPSED + 1))
+done
+
+if [ -z "$FB_DEV" ]; then
+    echo "inland-tft35: fbtft framebuffer (ili9486) not found after ${TIMEOUT}s" >&2
+    exit 1
+fi
+
+echo "inland-tft35: found framebuffer ${FB_DEV} (fb_name=${fb_name})" >&2
+
+# Rebind fbcon to the fbtft framebuffer
+for vtcon in /sys/class/vtconsole/vtcon*; do
+    [ -d "$vtcon" ] || continue
+    vtname=$(cat "$vtcon/name" 2>/dev/null || true)
+    if echo "$vtname" | grep -qi "frame buffer"; then
+        echo 0 > "$vtcon/bind" 2>/dev/null || true
+        echo 1 > "$vtcon/bind" 2>/dev/null || true
+        echo "inland-tft35: rebound fbcon to fb${FB_NUM}" >&2
+    fi
+done
+
+# Update X11 fbdev config with the correct device
+XORG_CONF="/etc/X11/xorg.conf.d/99-spi-display.conf"
+if [ -f "$XORG_CONF" ]; then
+    sed -i "s|Option.*\"fbdev\".*|    Option      \"fbdev\"  \"${FB_DEV}\"|" "$XORG_CONF"
+    echo "inland-tft35: updated X11 fbdev path to ${FB_DEV}" >&2
+fi
+
+echo "$FB_DEV"
+HEOF
+chmod +x "$HELPER"
+echo "  Created ${HELPER}"
+
+# Create systemd service
+SYSTEMD_SVC="/etc/systemd/system/${SERVICE_NAME}.service"
+cat > "$SYSTEMD_SVC" <<SEOF
+[Unit]
+Description=Configure Inland TFT35 SPI display at boot
+After=basic.target
+Before=display-manager.service lightdm.service gdm.service
+
+[Service]
+Type=oneshot
+ExecStart=${HELPER}
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+SEOF
+systemctl daemon-reload
+systemctl enable "${SERVICE_NAME}.service" 2>/dev/null || true
+echo "  Enabled ${SERVICE_NAME}.service"
+STEP=$((STEP + 1))
+
+# ── 6. Configure X11 display ────────────────────────────────────────
+
+echo "[$STEP/$TOTAL] Installing display packages & configuring X11 ..."
+
+# Ensure the fbdev X11 driver is installed (not always present by default)
+if command -v apt-get >/dev/null 2>&1; then
+    apt-get install -y -qq xserver-xorg-video-fbdev 2>/dev/null || \
+        echo "  Warning: could not install xserver-xorg-video-fbdev"
+fi
+
 XORG_CONF_DIR="/etc/X11/xorg.conf.d"
-XORG_CONF="$XORG_CONF_DIR/99-ili9481.conf"
+XORG_CONF="$XORG_CONF_DIR/99-spi-display.conf"
 mkdir -p "$XORG_CONF_DIR"
 cat > "$XORG_CONF" <<'XEOF'
-# Route X11 display output to the ILI9481 SPI display.
-# The DRM driver creates /dev/dri/cardN — modesetting picks it up by name.
+# Route X11 to the fbtft SPI framebuffer via the fbdev driver.
+# The inland-tft35-display.service updates the fbdev path at boot.
 
 Section "Device"
-    Identifier  "ILI9481"
-    Driver      "modesetting"
-    Option      "kmsdev" "/dev/dri/card1"
-    # card1 is the ILI9481; card0 is vc4-kms-v3d (HDMI/DSI).
-    # The ili9481-display.service updates this path at boot in case
-    # the card number ever differs from the default.
+    Identifier  "InlandTFT35"
+    Driver      "fbdev"
+    Option      "fbdev"  "/dev/fb0"
 EndSection
 
-# Prefer the ILI9481 output over HDMI
 Section "Screen"
     Identifier  "SPI-Screen"
-    Device      "ILI9481"
+    Device      "InlandTFT35"
 EndSection
 
 Section "ServerLayout"
@@ -259,122 +356,32 @@ Section "ServerLayout"
     Screen      "SPI-Screen"
 EndSection
 XEOF
-echo "  Created $XORG_CONF"
-
-# Also install a helper script that finds the correct DRM card at boot
-HELPER="/usr/local/bin/ili9481-find-card"
-cat > "$HELPER" <<'HEOF'
-#!/bin/bash
-# Find the /dev/dri/cardN belonging to the ili9481 driver and configure
-# all display sinks (X11 modesetting, Wayland/wlroots, fbcon) to use it.
-# Wait up to 30 seconds for the module to load (it loads via DT overlay
-# and DKMS, which can take 10-15s on a Pi 3).
-TIMEOUT=30
-ELAPSED=0
-while [ $ELAPSED -lt $TIMEOUT ]; do
-    for drv_link in /sys/class/drm/card*/device/driver; do
-        [ -d "$drv_link" ] || continue
-        mod=$(basename "$(readlink -f "$drv_link/module")" 2>/dev/null)
-        if [ "$mod" = "ili9481" ]; then
-            CARD_NAME=$(basename "$(dirname "$(dirname "$drv_link")")") 
-            CARD_DEV="/dev/dri/$CARD_NAME"
-
-            # Update X11 modesetting kmsdev path
-            if [ -f /etc/X11/xorg.conf.d/99-ili9481.conf ]; then
-                sed -i "s|Option.*\"kmsdev\".*|    Option      \"kmsdev\" \"$CARD_DEV\"|" \
-                    /etc/X11/xorg.conf.d/99-ili9481.conf
-            fi
-
-            # Set WLR_DRM_DEVICES for Wayland compositors (labwc, wayfire, sway).
-            # Restricts wlroots to the ILI9481 DRM device only, preventing
-            # the compositor from also scanning vc4 HDMI/DSI outputs.
-            printf 'WLR_DRM_DEVICES=%s\n' "$CARD_DEV" \
-                > /etc/environment.d/99-ili9481.conf
-            if [ -d /etc/labwc ]; then
-                printf 'WLR_DRM_DEVICES=%s\n' "$CARD_DEV" \
-                    > /etc/labwc/environment
-            fi
-
-            # ── Map fbcon to the ILI9481 framebuffer ──────────────
-            # The fb number varies depending on whether vc4 (HDMI)
-            # creates an fbdev.  Detect it dynamically.
-            FB_NUM=""
-            for fb in /sys/class/graphics/fb*; do
-                [ -d "$fb" ] || continue
-                fb_name=$(cat "$fb/name" 2>/dev/null || true)
-                if echo "$fb_name" | grep -qi "ili9481"; then
-                    FB_NUM=$(basename "$fb" | sed 's/fb//')
-                    break
-                fi
-            done
-
-            if [ -n "$FB_NUM" ]; then
-                # Rebind fbcon so it picks up the ILI9481 fb
-                for vtcon in /sys/class/vtconsole/vtcon*; do
-                    [ -d "$vtcon" ] || continue
-                    vtname=$(cat "$vtcon/name" 2>/dev/null || true)
-                    if echo "$vtname" | grep -qi "frame buffer"; then
-                        echo 0 > "$vtcon/bind" 2>/dev/null || true
-                        echo 1 > "$vtcon/bind" 2>/dev/null || true
-                    fi
-                done
-                echo "ili9481: mapped fbcon to fb${FB_NUM}" >&2
-            fi
-
-            echo "$CARD_DEV"
-            exit 0
-        fi
-    done
-    sleep 1
-    ELAPSED=$((ELAPSED + 1))
-done
-echo "ili9481 DRM card not found after ${TIMEOUT}s" >&2
-exit 1
-HEOF
-chmod +x "$HELPER"
-echo "  Created $HELPER"
-
-# Pre-create Wayland environment files with the expected card path.
-# The ili9481-display.service updates them at first boot with the
-# real path (in case it differs from card1).
-mkdir -p /etc/environment.d
-printf 'WLR_DRM_DEVICES=/dev/dri/card1\n' > /etc/environment.d/99-ili9481.conf
-echo "  Created /etc/environment.d/99-ili9481.conf (Wayland WLR_DRM_DEVICES=card1)"
-# labwc reads /etc/labwc/environment before starting the compositor
-mkdir -p /etc/labwc
-printf 'WLR_DRM_DEVICES=/dev/dri/card1\n' > /etc/labwc/environment
-echo "  Created /etc/labwc/environment (labwc compositor Wayland env)"
-
-# Run the helper at boot before the display manager starts
-SYSTEMD_SVC="/etc/systemd/system/ili9481-display.service"
-cat > "$SYSTEMD_SVC" <<SEOF
-[Unit]
-Description=Configure ILI9481 SPI display as primary
-After=basic.target
-Before=display-manager.service lightdm.service gdm.service
-
-[Service]
-Type=oneshot
-ExecStart=$HELPER
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-SEOF
-systemctl daemon-reload
-systemctl enable ili9481-display.service 2>/dev/null || true
-echo "  Enabled ili9481-display.service"
+echo "  Created ${XORG_CONF}"
 STEP=$((STEP + 1))
 
-# ── 8. Configure touchscreen input ──────────────────────────────────
+# ── 7. Configure touchscreen input ──────────────────────────────────
 
-echo "[$STEP/$TOTAL] Configuring touchscreen input ..."
+if [ "$TOUCH" -eq 1 ]; then
+    echo "[$STEP/$TOTAL] Configuring touchscreen input ..."
 
-# libinput / evdev config for XPT2046
-TOUCH_XORG="/etc/X11/xorg.conf.d/99-xpt2046-touch.conf"
-cat > "$TOUCH_XORG" <<'TEOF'
-# XPT2046 resistive touchscreen input configuration
-# Adjust CalibrationMatrix if touch coordinates are misaligned.
+    # Ensure the evdev X11 input driver is installed (for CalibrationMatrix)
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get install -y -qq xserver-xorg-input-evdev 2>/dev/null || \
+            echo "  Warning: could not install xserver-xorg-input-evdev"
+    fi
+
+    # Calibration matrix based on rotation
+    case "$ROTATE" in
+        0)   CAL_MATRIX="1 0 0 0 1 0 0 0 1" ;;
+        90)  CAL_MATRIX="0 1 0 -1 0 1 0 0 1" ;;
+        180) CAL_MATRIX="-1 0 1 0 -1 1 0 0 1" ;;
+        270) CAL_MATRIX="0 -1 1 1 0 0 0 0 1" ;;
+    esac
+
+    TOUCH_XORG="$XORG_CONF_DIR/99-touch-calibration.conf"
+    cat > "$TOUCH_XORG" <<TEOF
+# XPT2046/ADS7846 resistive touchscreen calibration
+# Rotation: ${ROTATE}°
 
 Section "InputClass"
     Identifier      "XPT2046 Touchscreen"
@@ -382,29 +389,26 @@ Section "InputClass"
     MatchDevicePath "/dev/input/event*"
     Driver          "evdev"
 
-    # Identity matrix (no transformation) — adjust after calibration:
-    #   For 0°   rotation: 1 0 0 0 1 0 0 0 1
-    #   For 90°  rotation: 0 1 0 -1 0 1 0 0 1
-    #   For 180° rotation: -1 0 1 0 -1 1 0 0 1
-    #   For 270° rotation: 0 -1 1 1 0 0 0 0 1
-    Option "CalibrationMatrix" "1 0 0 0 1 0 0 0 1"
+    # Calibration matrix for ${ROTATE}° rotation
+    Option "CalibrationMatrix" "${CAL_MATRIX}"
 
     Option "InvertY"    "false"
     Option "InvertX"    "false"
     Option "SwapAxes"   "false"
 EndSection
 TEOF
-echo "  Created $TOUCH_XORG"
+    echo "  Created ${TOUCH_XORG}"
 
-# udev rule to tag the XPT2046 as a touchscreen for libinput
-TOUCH_UDEV="/etc/udev/rules.d/99-xpt2046.rules"
-cat > "$TOUCH_UDEV" <<'UEOF'
+    # udev rule to tag the XPT2046 as a touchscreen for libinput
+    TOUCH_UDEV="/etc/udev/rules.d/99-xpt2046.rules"
+    cat > "$TOUCH_UDEV" <<'UEOF'
 # Tag ADS7846/XPT2046 as a touchscreen so libinput handles it correctly
 ACTION=="add|change", KERNEL=="event*", ATTRS{name}=="ADS7846 Touchscreen", \
     ENV{ID_INPUT_TOUCHSCREEN}="1"
 UEOF
-echo "  Created $TOUCH_UDEV"
-STEP=$((STEP + 1))
+    echo "  Created ${TOUCH_UDEV}"
+    STEP=$((STEP + 1))
+fi
 
 # ── Done ─────────────────────────────────────────────────────────────
 
@@ -414,11 +418,15 @@ echo ""
 echo "  sudo reboot"
 echo ""
 echo "After reboot, verify with:"
-echo "  dmesg | grep ili9481"
-echo "  cat /proc/bus/input/devices | grep -A5 -i touch"
-echo "  ls -l /dev/dri/card*"
+echo "  lsmod | grep fb_ili9486"
+echo "  ls /dev/fb*"
+echo "  dmesg | grep ili9486"
+echo "  cat /proc/bus/input/devices | grep -A5 ADS7846"
 echo ""
-echo "If the display works but touch coordinates are off, calibrate:"
+echo "Run the test script:"
+echo "  sudo ./scripts/test-display.sh"
+echo ""
+echo "If touch coordinates are off, calibrate:"
 echo "  sudo apt-get install -y xinput-calibrator"
 echo "  DISPLAY=:0 xinput_calibrator"
 echo ""
