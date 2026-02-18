@@ -111,7 +111,12 @@ sudo ./install.sh --speed=24000000 --rotate=90
 6. **Switches from Wayland to X11** via `raspi-config` (fbtft requires X11)
 7. **Creates a systemd service** (`inland-tft35-display.service`) that at
    boot finds the fbtft framebuffer, uses `con2fbmap` to remap consoles,
-   and updates the X11 fbdev config to point to the correct `/dev/fbN`
+   writes a test pattern to verify display hardware, and updates the X11
+   fbdev config to point to the correct `/dev/fbN`
+   7b. **Creates a defio flush daemon** (`inland-tft35-flush.service`) that
+   continuously forces fbtft to push framebuffer content over SPI. On
+   kernel 6.x, fbcon's direct memory writes don't trigger fbtft's
+   deferred I/O mechanism, so without this daemon the LCD stays white.
 8. **Installs `xserver-xorg-video-fbdev`** + creates X11 config
 9. **Installs `xserver-xorg-input-evdev`** + creates touch calibration config
    with rotation-appropriate calibration matrix + udev rule
@@ -201,7 +206,8 @@ Then update the matrix in `/etc/X11/xorg.conf.d/99-touch-calibration.conf`.
 | White/blank screen        | `vc4-kms-v3d` still active                        | Re-run `sudo ./install.sh`                                                    |
 | White/blank screen        | `display_auto_detect` loading conflicting overlay | Re-run `sudo ./install.sh` (it disables auto-detect)                          |
 | White/blank screen        | Wrong overlay                                     | Try `sudo ./install.sh --overlay=waveshare35a`                                |
-| White/blank screen        | fbcon/X11 rendering to fb0 instead of fb1         | Re-run `sudo ./install.sh` (it now adds `fbcon=map:10` to cmdline.txt)        |
+| White/blank screen        | fbcon/X11 rendering to fb0 instead of fb1         | Re-run `sudo ./install.sh` (it adds `fbcon=map:10` to cmdline.txt)            |
+| White/blank screen        | defio flush daemon not running                    | `sudo systemctl restart inland-tft35-flush.service`                           |
 | No framebuffer device     | Overlay not loaded                                | Check `config.txt` has `dtoverlay=piscreen` under `[all]`; reboot             |
 | Console on HDMI not SPI   | fbcon mapped to wrong fb device                   | Check `cat /proc/cmdline` for `fbcon=map:10`; run `con2fbmap 1` to verify     |
 | Touch not working         | Wiring or overlay issue                           | Check IRQ=GPIO17, CE1 wiring                                                  |
@@ -276,6 +282,13 @@ the Raspberry Pi OS kernel:
 - **`fb_ili9486` module**: Part of the fbtft staging driver tree, handles
   the ILI9486 initialization sequence and SPI framebuffer updates
 - **`ads7846` module**: Standard kernel touchscreen driver for XPT2046
+- **`inland-tft35-flush` daemon**: On kernel 6.x, the fbtft driver uses a
+  deferred I/O mechanism that relies on mmap page faults to know when the
+  framebuffer has changed. However, fbcon (and sometimes X11) writes
+  directly to the framebuffer's kernel memory (`screen_base`) without
+  triggering page faults. This daemon periodically touches every
+  framebuffer page via mmap, forcing page faults that trigger fbtft to
+  send the current framebuffer content over SPI to the LCD.
 
 The `vc4-kms-v3d` overlay must be disabled because fbtft creates a legacy
 framebuffer device (`/dev/fbN`). Wayland compositors require DRM/KMS

@@ -118,8 +118,9 @@ for f in ili9481.dtbo xpt2046.dtbo; do
 done
 
 # Remove old systemd services
-for svc in ili9481-display inland-tft35-display; do
+for svc in ili9481-display inland-tft35-display inland-tft35-flush; do
     if [ -f "/etc/systemd/system/${svc}.service" ]; then
+        systemctl stop "${svc}.service" 2>/dev/null || true
         systemctl disable "${svc}.service" 2>/dev/null || true
         rm -f "/etc/systemd/system/${svc}.service"
         echo "  Removed ${svc}.service"
@@ -130,6 +131,7 @@ systemctl daemon-reload 2>/dev/null || true
 # Remove old helper scripts
 rm -f /usr/local/bin/ili9481-find-card 2>/dev/null || true
 rm -f /usr/local/bin/inland-tft35-setup 2>/dev/null || true
+rm -f /usr/local/bin/inland-tft35-flush 2>/dev/null || true
 
 # Remove old X11/Wayland configs
 rm -f /etc/X11/xorg.conf.d/99-ili9481.conf 2>/dev/null || true
@@ -459,11 +461,37 @@ else
     done
 fi
 
+# Log framebuffer details for diagnostics
+FB_SYS="/sys/class/graphics/fb${FB_NUM}"
+echo "inland-tft35: bpp=$(cat "$FB_SYS/bits_per_pixel" 2>/dev/null) stride=$(cat "$FB_SYS/stride" 2>/dev/null) size=$(cat "$FB_SYS/virtual_size" 2>/dev/null)" >&2
+
+# ── HARDWARE VERIFICATION: Write test data to the framebuffer ────────
+# If fbtft's SPI data path works, the LCD will show random static noise.
+# If the screen stays white, SPI data is not reaching the LCD.
+echo "inland-tft35: writing test data to ${FB_DEV} ..." >&2
+dd if=/dev/urandom of="${FB_DEV}" bs=1024 count=300 2>/dev/null && \
+    echo "inland-tft35: wrote 300KB — screen should show static noise" >&2 || \
+    echo "inland-tft35: WARNING: write to ${FB_DEV} failed!" >&2
+
+# Give the test pattern 1 second of visibility before fbcon overwrites it
+sleep 1
+
+# Also try via python mmap (triggers defio via page fault, different path)
+python3 -c "
+import mmap, os
+fd = os.open('${FB_DEV}', os.O_RDWR)
+m = mmap.mmap(fd, 0)
+m[:m.size()] = b'\\x1f\\x00' * (m.size() // 2)
+m.close()
+os.close(fd)
+" 2>/dev/null && echo "inland-tft35: mmap blue test written" >&2 || true
+sleep 1
+
 # Update X11 fbdev config with the correct device path
 XORG_CONF="/etc/X11/xorg.conf.d/99-spi-display.conf"
 if [ -f "$XORG_CONF" ]; then
     sed -i "s|Option.*\"fbdev\".*|    Option      \"fbdev\"  \"${FB_DEV}\"|" "$XORG_CONF"
-    echo "inland-tft35: updated X11 fbdev path to ${FB_DEV}" >&2
+    echo "inland-tft35: updated X11 fbdev → ${FB_DEV}" >&2
 fi
 
 echo "$FB_DEV"
@@ -492,6 +520,88 @@ SEOF
 systemctl daemon-reload
 systemctl enable "${SERVICE_NAME}.service" 2>/dev/null || true
 echo "  Enabled ${SERVICE_NAME}.service"
+
+# ── Create the defio flush daemon ────────────────────────────────────
+# On kernel 6.x, fbcon writes directly to screen_base (kernel vmalloc
+# memory), which does NOT trigger fbtft's deferred I/O page fault
+# mechanism.  Without defio, fbtft never pushes pixel data over SPI,
+# and the LCD stays in its power-on default state (white).
+#
+# This daemon periodically touches every framebuffer page via mmap,
+# which triggers page faults → defio marks pages dirty → fbtft sends
+# the current framebuffer content over SPI → LCD shows the image.
+#
+# The daemon is lightweight: ~75 page touches per cycle at 20 fps.
+
+FLUSH_HELPER="/usr/local/bin/inland-tft35-flush"
+cat > "$FLUSH_HELPER" << 'FEOF'
+#!/usr/bin/env python3
+"""Force fbtft deferred I/O updates by touching framebuffer pages via mmap.
+
+Works around a kernel 6.x issue where fbcon and X11 writes to the
+framebuffer don't always trigger fbtft's SPI transfers.
+"""
+import mmap, os, time, signal, sys
+
+def find_fbtft_fb():
+    for name in sorted(os.listdir('/sys/class/graphics/')):
+        if not name.startswith('fb'):
+            continue
+        try:
+            with open(f'/sys/class/graphics/{name}/name') as f:
+                if 'ili9486' in f.read().lower():
+                    return f'/dev/{name}'
+        except (IOError, PermissionError):
+            continue
+    return None
+
+def main():
+    signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
+    signal.signal(signal.SIGINT, lambda *a: sys.exit(0))
+
+    fb_path = find_fbtft_fb()
+    if not fb_path:
+        print('inland-tft35-flush: no fbtft framebuffer found', file=sys.stderr)
+        sys.exit(1)
+
+    fd = os.open(fb_path, os.O_RDWR)
+    m = mmap.mmap(fd, 0)
+    page_size = os.sysconf('SC_PAGESIZE')
+    fb_size = m.size()
+
+    print(f'inland-tft35-flush: active on {fb_path} '
+          f'({fb_size} bytes, {fb_size // page_size} pages)',
+          file=sys.stderr)
+
+    while True:
+        for offset in range(0, fb_size, page_size):
+            m[offset] = m[offset]  # read-write triggers page fault → defio
+        time.sleep(0.05)  # ~20 fps
+
+if __name__ == '__main__':
+    main()
+FEOF
+chmod +x "$FLUSH_HELPER"
+echo "  Created ${FLUSH_HELPER}"
+
+FLUSH_SVC="/etc/systemd/system/inland-tft35-flush.service"
+cat > "$FLUSH_SVC" <<FLEOF
+[Unit]
+Description=Force fbtft SPI display updates (defio flush)
+After=inland-tft35-display.service
+Requires=inland-tft35-display.service
+
+[Service]
+Type=simple
+ExecStart=${FLUSH_HELPER}
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+FLEOF
+systemctl enable inland-tft35-flush.service 2>/dev/null || true
+echo "  Enabled inland-tft35-flush.service (defio flush daemon)"
 STEP=$((STEP + 1))
 
 # ═════════════════════════════════════════════════════════════════════
@@ -606,6 +716,7 @@ if [ "$SWITCHED_TO_X11" -eq 1 ]; then
     echo "  • Display backend switched from Wayland to X11"
 fi
 echo "  • systemd service: ${SERVICE_NAME}.service (remaps fbcon+X11 at boot)"
+echo "  • defio flush daemon: inland-tft35-flush.service (forces SPI updates)"
 echo "  • X11 config: /etc/X11/xorg.conf.d/99-spi-display.conf → /dev/fb1"
 if [ "$TOUCH" -eq 1 ]; then
     echo "  • Touch config: /etc/X11/xorg.conf.d/99-touch-calibration.conf"
@@ -615,12 +726,11 @@ echo "⚠  HDMI output is DISABLED while the SPI display is active."
 echo "   To restore HDMI, run: sudo ./uninstall.sh"
 echo ""
 echo "After reboot, verify with:"
-echo "  lsmod | grep fb_ili9486"
-echo "  ls /dev/fb*"
-echo "  dmesg | grep -i 'fbtft\|ili9486'"
-echo "  sudo ./scripts/test-display.sh"
+echo "  sudo journalctl -u inland-tft35-display.service  # check boot setup"
+echo "  sudo journalctl -u inland-tft35-flush.service    # check flush daemon"
+echo "  sudo ./scripts/test-display.sh                   # full diagnostics"
 echo ""
-echo "If the screen is still white after reboot, check:"
-echo "  sudo journalctl -u ${SERVICE_NAME}.service"
-echo "  dmesg | grep -i 'fbtft\|ili9486\|spi'"
-echo "  grep -r blacklist /etc/modprobe.d/ | grep -i fbtft"
+echo "If the screen is still white after reboot:"
+echo "  1. sudo ./scripts/test-display.sh --pattern      # writes test data to /dev/fb1"
+echo "  2. sudo journalctl -u inland-tft35-flush.service # flush daemon running?"
+echo "  3. dmesg | grep -iE 'fbtft|ili9486|spi.*err'     # SPI errors?"

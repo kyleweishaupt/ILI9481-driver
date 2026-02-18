@@ -269,9 +269,10 @@ if [ -n "$FB_DEV" ]; then
 fi
 
 # ═════════════════════════════════════════════════════════════════════
-# 10. Check systemd service
+# 10. Check systemd services
 # ═════════════════════════════════════════════════════════════════════
 
+# Setup service
 if systemctl is-enabled inland-tft35-display.service >/dev/null 2>&1; then
     pass "inland-tft35-display.service is enabled"
     if systemctl is-active inland-tft35-display.service >/dev/null 2>&1; then
@@ -290,33 +291,167 @@ else
     info "Run: sudo ./install.sh"
 fi
 
+# Flush daemon (critical for screen updates)
+if systemctl is-enabled inland-tft35-flush.service >/dev/null 2>&1; then
+    pass "inland-tft35-flush.service is enabled"
+    if systemctl is-active inland-tft35-flush.service >/dev/null 2>&1; then
+        pass "inland-tft35-flush.service is RUNNING (defio active)"
+    else
+        fail "inland-tft35-flush.service is NOT running!"
+        info "Without the flush daemon, fbtft may never send data to the LCD."
+        info "Check: sudo journalctl -u inland-tft35-flush.service"
+        info "Fix:   sudo systemctl restart inland-tft35-flush.service"
+    fi
+else
+    fail "inland-tft35-flush.service is not enabled"
+    info "The defio flush daemon is CRITICAL for the display to work."
+    info "Re-run: sudo ./install.sh"
+fi
+
 # ═════════════════════════════════════════════════════════════════════
-# 11. Optional: paint RGBW test pattern
+# 11. Check X11 / LightDM
+# ═════════════════════════════════════════════════════════════════════
+
+if pgrep -x Xorg >/dev/null 2>&1 || pgrep -x X >/dev/null 2>&1; then
+    pass "X11 server is running"
+    # Check which fb device X is using
+    X_FBDEV=$(grep -o '/dev/fb[0-9]*' /var/log/Xorg.0.log 2>/dev/null | head -1 || true)
+    [ -n "$X_FBDEV" ] && info "X11 is using: ${X_FBDEV}"
+elif pgrep -x labwc >/dev/null 2>&1 || pgrep -x wayfire >/dev/null 2>&1; then
+    fail "Wayland compositor is running (labwc/wayfire) — fbtft requires X11!"
+    info "Fix: sudo raspi-config → Advanced → Wayland → X11"
+else
+    info "No display server detected (X11 or Wayland)"
+    info "The display should still show a text console (fbcon)"
+fi
+
+if pgrep -x lightdm >/dev/null 2>&1; then
+    pass "LightDM display manager is running"
+else
+    info "LightDM is not running — check: sudo systemctl status lightdm"
+fi
+
+# ═════════════════════════════════════════════════════════════════════
+# 12. Check GPIO pin states (DC, RST, LED)
+# ═════════════════════════════════════════════════════════════════════
+
+if command -v pinctrl >/dev/null 2>&1; then
+    for pin_info in "24:DC" "25:RST" "22:LED"; do
+        pin=${pin_info%%:*}
+        label=${pin_info##*:}
+        state=$(pinctrl get "$pin" 2>/dev/null || true)
+        if [ -n "$state" ]; then
+            func=$(echo "$state" | grep -oE 'a[0-9]+|op|ip|no' | head -1)
+            level=$(echo "$state" | grep -oE 'hi|lo' | head -1)
+            if [ "$func" = "op" ] || echo "$func" | grep -q 'a[0-9]'; then
+                pass "GPIO ${pin} (${label}): ${func} ${level}"
+            else
+                fail "GPIO ${pin} (${label}): expected output, got ${func} ${level}"
+                info "fbtft may not have configured this pin correctly"
+            fi
+        fi
+    done
+elif command -v raspi-gpio >/dev/null 2>&1; then
+    for pin_info in "24:DC" "25:RST" "22:LED"; do
+        pin=${pin_info%%:*}
+        label=${pin_info##*:}
+        state=$(raspi-gpio get "$pin" 2>/dev/null || true)
+        [ -n "$state" ] && info "GPIO ${pin} (${label}): ${state}"
+    done
+fi
+
+# ═════════════════════════════════════════════════════════════════════
+# 13. SPI transfer check (look for errors in dmesg)
+# ═════════════════════════════════════════════════════════════════════
+
+if dmesg 2>/dev/null | grep -qiE 'spi.*(error|fail|timeout)|dma.*(error|fail)'; then
+    fail "SPI/DMA errors found in kernel log:"
+    dmesg | grep -iE 'spi.*(error|fail|timeout)|dma.*(error|fail)' | tail -5 | while IFS= read -r line; do
+        echo "     $line"
+    done
+else
+    pass "No SPI/DMA errors in kernel log"
+fi
+
+# ═════════════════════════════════════════════════════════════════════
+# 14. HARDWARE WRITE TEST (--pattern flag or always for write test)
 # ═════════════════════════════════════════════════════════════════════
 
 if [ "$PAINT_PATTERN" -eq 1 ] && [ -n "$FB_DEV" ] && [ -w "$FB_DEV" ]; then
     echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  HARDWARE WRITE TEST — Watch the SPI display screen!"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+
     FB_SYS="/sys/class/graphics/$(basename "$FB_DEV")"
-    BPP_BITS=$(cat "$FB_SYS/bits_per_pixel" 2>/dev/null || echo "16")
-    info "Framebuffer format: ${BPP_BITS} bits/pixel"
-    info "Painting RGBW colour bar test pattern to ${FB_DEV} ..."
+    FB_SIZE=$(( $(cat "$FB_SYS/virtual_size" 2>/dev/null | cut -d, -f1) * \
+                $(cat "$FB_SYS/virtual_size" 2>/dev/null | cut -d, -f2) * \
+                $(cat "$FB_SYS/bits_per_pixel" 2>/dev/null) / 8 )) 2>/dev/null || FB_SIZE=307200
+    NPIXELS=$((FB_SIZE / 2))
 
-    W=320; H=480
-    STRIPE=$((H / 4))
-    {
-        # Red   (RGB565 = 0xF800 → LE: 00 F8)
-        printf '%0.s\x00\xF8' $(seq 1 $((W * STRIPE)))
-        # Green (RGB565 = 0x07E0 → LE: E0 07)
-        printf '%0.s\xE0\x07' $(seq 1 $((W * STRIPE)))
-        # Blue  (RGB565 = 0x001F → LE: 1F 00)
-        printf '%0.s\x1F\x00' $(seq 1 $((W * STRIPE)))
-        # White (RGB565 = 0xFFFF → LE: FF FF)
-        printf '%0.s\xFF\xFF' $(seq 1 $((W * STRIPE)))
-    } > "$FB_DEV"
+    # --- Test A: write() syscall (triggers fb_sys_write → defio) ---
+    info "Test A: Writing random static via write() to ${FB_DEV}..."
+    dd if=/dev/urandom of="$FB_DEV" bs=1024 count=$((FB_SIZE / 1024)) 2>/dev/null
+    sleep 2
+    echo "     >>> Did the screen show colourful static/noise? <<<"
+    echo ""
 
-    pass "Test pattern written — you should see Red/Green/Blue/White stripes"
+    # --- Test B: mmap write (triggers page fault → defio) ---
+    info "Test B: Writing BLUE via mmap to ${FB_DEV}..."
+    python3 -c "
+import mmap, os
+fd = os.open('$FB_DEV', os.O_RDWR)
+m = mmap.mmap(fd, 0)
+blue = b'\x1f\x00' * (m.size() // 2)
+m[:len(blue)] = blue
+m.close()
+os.close(fd)
+print('     mmap write complete')
+" 2>/dev/null || info "Python mmap write failed (python3 may not be available)"
+    sleep 2
+    echo "     >>> Did the screen turn solid BLUE? <<<"
+    echo ""
+
+    # --- Test C: solid RED ---
+    info "Test C: Writing RED via write() to ${FB_DEV}..."
+    python3 -c "
+import os
+fb = os.open('$FB_DEV', os.O_WRONLY)
+os.write(fb, b'\x00\xf8' * $NPIXELS)
+os.close(fb)
+" 2>/dev/null || printf '%0.s\x00\xF8' $(seq 1 "$NPIXELS") > "$FB_DEV" 2>/dev/null
+    sleep 2
+    echo "     >>> Did the screen turn solid RED? <<<"
+    echo ""
+
+    # --- Test D: solid GREEN ---
+    info "Test D: Writing GREEN via write() to ${FB_DEV}..."
+    python3 -c "
+import os
+fb = os.open('$FB_DEV', os.O_WRONLY)
+os.write(fb, b'\xe0\x07' * $NPIXELS)
+os.close(fb)
+" 2>/dev/null || printf '%0.s\xE0\x07' $(seq 1 "$NPIXELS") > "$FB_DEV" 2>/dev/null
+    sleep 2
+    echo "     >>> Did the screen turn solid GREEN? <<<"
+    echo ""
+
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  RESULTS:"
+    echo ""
+    echo "  If you saw colour changes → display hardware WORKS."
+    echo "    The issue is what's being rendered (fbcon/X11 config)."
+    echo ""
+    echo "  If the screen stayed WHITE the entire time:"
+    echo "    → fbtft is NOT sending SPI data to the LCD."
+    echo "    → Check: sudo journalctl -u inland-tft35-flush.service"
+    echo "    → Check: dmesg | grep -iE 'spi.*err|dma.*err|fbtft'"
+    echo "    → The SPI bus or LCD hardware may have a fault."
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
 elif [ "$PAINT_PATTERN" -eq 1 ]; then
-    info "Skipping test pattern (no writable framebuffer device)"
+    info "Skipping hardware write test (no writable framebuffer device)"
 fi
 
 # ═════════════════════════════════════════════════════════════════════
@@ -328,13 +463,22 @@ echo "Results: ${PASSES} passed, ${ERRORS} failed"
 echo ""
 if [ "$ERRORS" -eq 0 ]; then
     pass "All checks passed"
+    if [ "$PAINT_PATTERN" -eq 0 ]; then
+        echo ""
+        echo "If the screen is still white, run the hardware write test:"
+        echo "  sudo ./scripts/test-display.sh --pattern"
+    fi
     exit 0
 else
     fail "${ERRORS} check(s) failed — review output above"
     echo ""
     echo "Common fixes:"
     echo "  White screen?  → sudo ./install.sh && sudo reboot"
+    echo "  Flush daemon?  → sudo systemctl restart inland-tft35-flush.service"
     echo "  Blacklisted?   → sudo rm /etc/modprobe.d/*fbtft* && sudo update-initramfs -u && sudo reboot"
     echo "  Wayland?       → sudo raspi-config → Advanced → Wayland → X11"
+    echo ""
+    echo "Run hardware write test:"
+    echo "  sudo ./scripts/test-display.sh --pattern"
     exit 1
 fi

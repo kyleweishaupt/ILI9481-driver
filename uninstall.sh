@@ -44,9 +44,10 @@ echo ""
 # Step 1: Remove systemd service and helper script
 # ═════════════════════════════════════════════════════════════════════
 
-echo "[$STEP/$TOTAL] Removing systemd service ..."
-for svc in inland-tft35-display ili9481-display; do
+echo "[$STEP/$TOTAL] Removing systemd services ..."
+for svc in inland-tft35-flush inland-tft35-display ili9481-display; do
     if [ -f "/etc/systemd/system/${svc}.service" ]; then
+        systemctl stop "${svc}.service" 2>/dev/null || true
         systemctl disable "${svc}.service" 2>/dev/null || true
         rm -f "/etc/systemd/system/${svc}.service"
         echo "  Removed ${svc}.service"
@@ -54,7 +55,7 @@ for svc in inland-tft35-display ili9481-display; do
 done
 systemctl daemon-reload 2>/dev/null || true
 
-for helper in /usr/local/bin/inland-tft35-setup /usr/local/bin/ili9481-find-card; do
+for helper in /usr/local/bin/inland-tft35-setup /usr/local/bin/inland-tft35-flush /usr/local/bin/ili9481-find-card; do
     [ -f "$helper" ] && rm -f "$helper" && echo "  Removed $helper"
 done
 STEP=$((STEP + 1))
