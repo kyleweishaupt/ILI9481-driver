@@ -311,19 +311,43 @@ static void *touch_thread_fn(void *arg)
 
     fprintf(stderr, "fbcp: Touch: swap_xy=%d invert_x=%d invert_y=%d raw=%d..%d\n",
             ta->swap_xy, ta->invert_x, ta->invert_y, ta->raw_min, ta->raw_max);
-    fprintf(stderr, "fbcp: Touch thread started (%s, ~100 Hz)\n", ta->spi_dev);
+    fprintf(stderr, "fbcp: Touch thread started (%s, ~150 Hz)\n", ta->spi_dev);
+
+    /*
+     * Pen-up debounce: require multiple consecutive pen-up reads before
+     * reporting pen-up.  This prevents brief lift-offs during a tap from
+     * breaking the touch into multiple events.
+     */
+    int pen_up_count = 0;
+    const int PEN_UP_DEBOUNCE = 3;  /* consecutive pen-up reads needed */
+    int was_down = 0;
 
     while (*(ta->running)) {
         int x, y;
         int down = xpt2046_read(ts, &cal, &x, &y);
+
         if (down) {
             if (x < 0) x = 0;
             if (x >= ta->width) x = ta->width - 1;
             if (y < 0) y = 0;
             if (y >= ta->height) y = ta->height - 1;
+
+            pen_up_count = 0;
+            was_down = 1;
+            uinput_touch_report(ut, 1, x, y);
+        } else {
+            if (was_down) {
+                pen_up_count++;
+                if (pen_up_count >= PEN_UP_DEBOUNCE) {
+                    uinput_touch_report(ut, 0, 0, 0);
+                    was_down = 0;
+                }
+                /* else: hold off on reporting pen-up */
+            }
+            /* If already up, uinput_touch_report will skip (state tracking) */
         }
-        uinput_touch_report(ut, down, x, y);
-        usleep(10000); /* ~100 Hz */
+
+        usleep(6500); /* ~150 Hz polling — faster for better responsiveness */
     }
 
     uinput_touch_destroy(ut);

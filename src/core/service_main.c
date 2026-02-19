@@ -189,22 +189,42 @@ static void *touch_thread_fn(void *arg)
         .ay = 0.0f, .by = (float)ta->height / 4096.0f, .cy = 0.0f,
     };
 
-    log_info("Touch thread started (polling at ~100 Hz)");
+    log_info("Touch thread started (polling at ~150 Hz)");
+
+    /*
+     * Pen-up debounce: require multiple consecutive pen-up reads before
+     * reporting pen-up.  This prevents brief lift-offs during a tap from
+     * breaking the touch into multiple events.
+     */
+    int pen_up_count = 0;
+    const int PEN_UP_DEBOUNCE = 3;
+    int was_down = 0;
 
     while (*(ta->running)) {
         int x, y;
         int down = xpt2046_read(ts, &cal, &x, &y);
 
-        /* Clamp to screen bounds */
         if (down) {
+            /* Clamp to screen bounds */
             if (x < 0) x = 0;
             if (x >= ta->width) x = ta->width - 1;
             if (y < 0) y = 0;
             if (y >= ta->height) y = ta->height - 1;
+
+            pen_up_count = 0;
+            was_down = 1;
+            uinput_touch_report(ut, 1, x, y);
+        } else {
+            if (was_down) {
+                pen_up_count++;
+                if (pen_up_count >= PEN_UP_DEBOUNCE) {
+                    uinput_touch_report(ut, 0, 0, 0);
+                    was_down = 0;
+                }
+            }
         }
 
-        uinput_touch_report(ut, down, x, y);
-        usleep(10000); /* ~100 Hz polling */
+        usleep(6500); /* ~150 Hz polling */
     }
 
     uinput_touch_destroy(ut);

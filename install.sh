@@ -38,6 +38,8 @@ echo "  Cmdline:     $CMDLINE"
 CONF_FILE="$SCRIPT_DIR/config/ili9481.conf"
 FBCP_FPS=20
 FBCP_SPI_SPEED=12
+RENDER_W=720
+RENDER_H=480
 
 if [ -f "$CONF_FILE" ]; then
     _val=$(grep -E '^fps\s*=' "$CONF_FILE" 2>/dev/null | sed 's/[^0-9]//g' || true)
@@ -45,10 +47,17 @@ if [ -f "$CONF_FILE" ]; then
 
     _val=$(grep -E '^display_speed\s*=' "$CONF_FILE" 2>/dev/null | head -1 | sed 's/[^0-9]//g' || true)
     [ -n "$_val" ] && FBCP_SPI_SPEED="$_val"
+
+    _val=$(grep -E '^render_width\s*=' "$CONF_FILE" 2>/dev/null | head -1 | sed 's/[^0-9]//g' || true)
+    [ -n "$_val" ] && RENDER_W="$_val"
+
+    _val=$(grep -E '^render_height\s*=' "$CONF_FILE" 2>/dev/null | head -1 | sed 's/[^0-9]//g' || true)
+    [ -n "$_val" ] && RENDER_H="$_val"
 fi
 
 echo "  FPS:         $FBCP_FPS"
 echo "  SPI speed:   ${FBCP_SPI_SPEED} MHz"
+echo "  Render:      ${RENDER_W}x${RENDER_H}"
 
 # ── 1. Build ──────────────────────────────────────────
 echo ""
@@ -159,10 +168,10 @@ if [ -f "$CMDLINE" ]; then
     CMDLINE_CONTENT=$(cat "$CMDLINE")
 
     # Force a video mode so the HDMI framebuffer exists at boot.
-    # Replace any prior setting.
+    # Resolution is read from ili9481.conf render_width/render_height.
     CMDLINE_CONTENT=$(echo "$CMDLINE_CONTENT" | sed 's/ *video=HDMI-A-1:[^ ]*//g')
-    CMDLINE_CONTENT="$CMDLINE_CONTENT video=HDMI-A-1:640x480@60D"
-    echo "  Set video=HDMI-A-1:640x480@60D"
+    CMDLINE_CONTENT="$CMDLINE_CONTENT video=HDMI-A-1:${RENDER_W}x${RENDER_H}@60D"
+    echo "  Set video=HDMI-A-1:${RENDER_W}x${RENDER_H}@60D"
 
     # Remove 'quiet' and 'splash' so boot messages are visible on TFT
     CMDLINE_CONTENT=$(echo "$CMDLINE_CONTENT" | sed 's/ quiet / /g; s/^quiet //; s/ quiet$//; s/ splash / /g; s/^splash //; s/ splash$//')
@@ -213,7 +222,7 @@ echo "[7/9] Configuring Xorg for framebuffer rendering..."
 # defines a modesetting Device that conflicts with fbdev; disable it.
 mkdir -p /etc/X11/xorg.conf.d
 
-cat > /etc/X11/xorg.conf.d/99-fbdev-tft.conf << 'XEOF'
+cat > /etc/X11/xorg.conf.d/99-fbdev-tft.conf << XEOF
 # Force Xorg to use fbdev driver so /dev/fb0 has real pixel data.
 # Required for fbcp to mirror the desktop to the TFT display.
 
@@ -241,7 +250,7 @@ Section "Screen"
   DefaultDepth 16
   SubSection "Display"
     Depth 16
-    Modes "640x480"
+    Modes "${RENDER_W}x${RENDER_H}"
   EndSubSection
 EndSection
 XEOF
@@ -298,6 +307,10 @@ echo ""
 echo " After reboot the TFT will show:"
 echo "   • Boot text messages (kernel + systemd)"
 echo "   • Desktop (mirrored from HDMI framebuffer)"
+echo ""
+echo " On-Screen Keyboard (for touchscreen typing):"
+echo "   Run:  sudo ./scripts/setup-onscreen-keyboard.sh"
+echo "   This installs 'onboard' with auto-show on text focus."
 echo ""
 echo " Commands:"
 echo "   Status:  sudo systemctl status fbcp"
