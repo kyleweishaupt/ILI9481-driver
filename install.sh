@@ -144,17 +144,47 @@ if [ -f "$CMDLINE" ]; then
     echo "  Removed 'quiet' and 'splash' for visible boot"
 fi
 
-# ── 6. Install systemd service ───────────────────────
+# ── 6. Switch desktop session to X11 ──────────────────
 echo ""
-echo "[6/7] Installing systemd service..."
+echo "[6/8] Configuring desktop session..."
+
+# FKMS does not support Wayland compositors (labwc, wlroots).
+# If lightdm is configured for Wayland sessions, switch to X11.
+LIGHTDM_CONF="/etc/lightdm/lightdm.conf"
+if [ -f "$LIGHTDM_CONF" ]; then
+    CHANGED=0
+    if grep -q "^greeter-session=pi-greeter-labwc" "$LIGHTDM_CONF" 2>/dev/null; then
+        sed -i 's/^greeter-session=pi-greeter-labwc/greeter-session=pi-greeter/' "$LIGHTDM_CONF"
+        CHANGED=1
+    fi
+    if grep -q "^user-session=rpd-labwc" "$LIGHTDM_CONF" 2>/dev/null; then
+        sed -i 's/^user-session=rpd-labwc/user-session=rpd-x/' "$LIGHTDM_CONF"
+        CHANGED=1
+    fi
+    if grep -q "^autologin-session=rpd-labwc" "$LIGHTDM_CONF" 2>/dev/null; then
+        sed -i 's/^autologin-session=rpd-labwc/autologin-session=rpd-x/' "$LIGHTDM_CONF"
+        CHANGED=1
+    fi
+    if [ "$CHANGED" -eq 1 ]; then
+        echo "  Switched Wayland (labwc) → X11 (rpd-x) sessions"
+    else
+        echo "  Already using X11 sessions"
+    fi
+else
+    echo "  No lightdm config found (skipped)"
+fi
+
+# ── 7. Install systemd service ───────────────────────
+echo ""
+echo "[7/8] Installing systemd service..."
 cp systemd/fbcp.service /etc/systemd/system/fbcp.service
 systemctl daemon-reload
 systemctl enable fbcp.service
 echo "  Enabled fbcp.service"
 
-# ── 7. Start the service now ─────────────────────────
+# ── 8. Start the service now ─────────────────────────
 echo ""
-echo "[7/7] Starting display service..."
+echo "[8/8] Starting display service..."
 systemctl restart fbcp.service
 sleep 3
 

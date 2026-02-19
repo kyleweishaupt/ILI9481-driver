@@ -100,6 +100,9 @@ sed -i 's/^#\(dtoverlay=vc4-kms-v3d\)/\1/'     "$CONFIG"
 sed -i 's/^#\(dtoverlay=vc4-fkms-v3d\)/\1/'    "$CONFIG"
 sed -i 's/^#\(display_auto_detect=1\)/\1/'      "$CONFIG"
 
+# Switch fkms back to full kms (Pi OS default)
+sed -i 's/^dtoverlay=vc4-fkms-v3d/dtoverlay=vc4-kms-v3d/' "$CONFIG"
+
 # Clean cmdline.txt
 sed -i 's/ fbcon=map:[^ ]*//g'           "$CMDLINE"
 sed -i 's/ video=HDMI-A-1:[^ ]*//g'      "$CMDLINE"
@@ -119,9 +122,14 @@ echo "[7/7] Removing overlay artifacts"
 rm -f "${OVERLAYS_DIR}/inland-ili9481-overlay.dtbo"
 rm -f "${OVERLAYS_DIR}/inland-ili9481-overlay.dts"
 
-# Do NOT automatically switch the desktop backend — leave it as the user had it.
-# If the install.sh changed Wayland→X11, the user can restore it themselves via:
-#   sudo raspi-config → Advanced Options → Wayland
+# Restore Wayland sessions if install.sh switched to X11
+LIGHTDM_CONF="/etc/lightdm/lightdm.conf"
+if [ -f "$LIGHTDM_CONF" ]; then
+    sed -i 's/^greeter-session=pi-greeter$/greeter-session=pi-greeter-labwc/' "$LIGHTDM_CONF" 2>/dev/null || true
+    sed -i 's/^user-session=rpd-x$/user-session=rpd-labwc/' "$LIGHTDM_CONF" 2>/dev/null || true
+    sed -i 's/^autologin-session=rpd-x$/autologin-session=rpd-labwc/' "$LIGHTDM_CONF" 2>/dev/null || true
+    echo "  Restored Wayland (labwc) desktop sessions"
+fi
 
 echo
 echo "Uninstall complete."

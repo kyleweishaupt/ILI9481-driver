@@ -229,14 +229,16 @@ int main(int argc, char **argv)
 {
     const char *src_dev="/dev/fb0", *spi_dev="/dev/spidev0.0", *gpiochip="/dev/gpiochip0";
     int fps = 15;
+    int test_pattern = 0;
 
     for (int i=1; i<argc; i++) {
         if (!strncmp(argv[i],"--src=",6)) src_dev=argv[i]+6;
         else if (!strncmp(argv[i],"--spi=",6)) spi_dev=argv[i]+6;
         else if (!strncmp(argv[i],"--gpio=",7)) gpiochip=argv[i]+7;
         else if (!strncmp(argv[i],"--fps=",6)) { fps=atoi(argv[i]+6); if(fps<1)fps=1; if(fps>60)fps=60; }
+        else if (!strcmp(argv[i],"--test")) test_pattern=1;
         else if (!strcmp(argv[i],"-h")||!strcmp(argv[i],"--help")) {
-            printf("Usage: fbcp [--src=DEV] [--spi=DEV] [--gpio=CHIP] [--fps=N]\n"); return 0;
+            printf("Usage: fbcp [--src=DEV] [--spi=DEV] [--gpio=CHIP] [--fps=N] [--test]\n"); return 0;
         }
     }
 
@@ -254,22 +256,21 @@ int main(int argc, char **argv)
 
     fprintf(stderr, "fbcp: Initializing ILI9486 (16-bit regwidth)...\n");
     ili9486_init();
-    fprintf(stderr, "fbcp: Init done. Filling screen RED...\n");
+    fprintf(stderr, "fbcp: Init done.\n");
 
-    /* Test: fill screen solid red so user can see immediately */
-    lcd_fill(0xF800);  /* Red in RGB565 */
-    fprintf(stderr, "fbcp: RED fill sent. Display should show red now.\n");
-    sleep(2);
+    if (test_pattern) {
+        fprintf(stderr, "fbcp: Test pattern mode — R/G/B fills, 2s each\n");
+        lcd_fill(0xF800); fprintf(stderr, "  RED\n");   sleep(2);
+        lcd_fill(0x07E0); fprintf(stderr, "  GREEN\n"); sleep(2);
+        lcd_fill(0x001F); fprintf(stderr, "  BLUE\n");  sleep(2);
+        lcd_fill(0xFFFF); fprintf(stderr, "  WHITE\n"); sleep(2);
+        lcd_fill(0x0000); fprintf(stderr, "  BLACK\n"); sleep(2);
+        fprintf(stderr, "fbcp: Test pattern complete.\n");
+        close(spi_fd); close(dc_fd); close(rst_fd);
+        return 0;
+    }
 
-    fprintf(stderr, "fbcp: Filling GREEN...\n");
-    lcd_fill(0x07E0);
-    sleep(1);
-
-    fprintf(stderr, "fbcp: Filling BLUE...\n");
-    lcd_fill(0x001F);
-    sleep(1);
-
-    /* Now open fb0 and start mirroring */
+    /* Open fb0 and start mirroring */
     struct fbi src;
     if (fb_open(src_dev, &src) < 0) { close(spi_fd); return 1; }
 
