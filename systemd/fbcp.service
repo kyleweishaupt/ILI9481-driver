@@ -26,7 +26,7 @@ ExecStartPre=/bin/bash -c '\
     sleep 1; \
   done; \
   echo "Warning: /dev/fb0 not found after 15s" >&2'
-ExecStart=/usr/local/bin/fbcp --fps=10
+ExecStart=/usr/local/bin/fbcp --fps=10 --touch
 Restart=on-failure
 RestartSec=5
 KillMode=process

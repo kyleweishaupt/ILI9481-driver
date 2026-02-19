@@ -146,7 +146,7 @@ fi
 
 # ── 6. Switch desktop session to X11 ──────────────────
 echo ""
-echo "[6/8] Configuring desktop session..."
+echo "[6/9] Configuring desktop session..."
 
 # FKMS does not support Wayland compositors (labwc, wlroots).
 # If lightdm is configured for Wayland sessions, switch to X11.
@@ -174,17 +174,76 @@ else
     echo "  No lightdm config found (skipped)"
 fi
 
-# ── 7. Install systemd service ───────────────────────
+# ── 7. Configure Xorg for fbdev ──────────────────────
 echo ""
-echo "[7/8] Installing systemd service..."
+echo "[7/9] Configuring Xorg for framebuffer rendering..."
+
+# Xorg must use the fbdev driver (not modesetting) so that it renders
+# into /dev/fb0 which fbcp can mmap.  The system's 20-noglamor.conf
+# defines a modesetting Device that conflicts with fbdev; disable it.
+mkdir -p /etc/X11/xorg.conf.d
+
+cat > /etc/X11/xorg.conf.d/99-fbdev-tft.conf << 'XEOF'
+# Force Xorg to use fbdev driver so /dev/fb0 has real pixel data.
+# Required for fbcp to mirror the desktop to the TFT display.
+
+Section "ServerLayout"
+  Identifier "TFT Layout"
+  Screen "Default Screen"
+  Option "AutoAddGPU" "false"
+EndSection
+
+Section "ServerFlags"
+  Option "AutoAddDevices" "true"
+  Option "AutoAddGPU" "false"
+  Option "Debug" "None"
+EndSection
+
+Section "Device"
+  Identifier "FBDEV"
+  Driver "fbdev"
+  Option "fbdev" "/dev/fb0"
+EndSection
+
+Section "Screen"
+  Identifier "Default Screen"
+  Device "FBDEV"
+  DefaultDepth 16
+  SubSection "Display"
+    Depth 16
+    Modes "640x480"
+  EndSubSection
+EndSection
+XEOF
+echo "  Installed /etc/X11/xorg.conf.d/99-fbdev-tft.conf"
+
+# Disable the system modesetting override that conflicts with fbdev
+NOGLAMOR="/usr/share/X11/xorg.conf.d/20-noglamor.conf"
+if [ -f "$NOGLAMOR" ]; then
+    mv "$NOGLAMOR" "${NOGLAMOR}.bak"
+    echo "  Disabled 20-noglamor.conf (modesetting conflict)"
+else
+    echo "  20-noglamor.conf already disabled"
+fi
+
+# Also disable the v3d modesetting config if present
+V3DCONF="/etc/X11/xorg.conf.d/99-v3d.conf"
+if [ -f "$V3DCONF" ]; then
+    mv "$V3DCONF" "${V3DCONF}.bak"
+    echo "  Disabled 99-v3d.conf (modesetting conflict)"
+fi
+
+# ── 8. Install systemd service ───────────────────────
+echo ""
+echo "[8/9] Installing systemd service..."
 cp systemd/fbcp.service /etc/systemd/system/fbcp.service
 systemctl daemon-reload
 systemctl enable fbcp.service
 echo "  Enabled fbcp.service"
 
-# ── 8. Start the service now ─────────────────────────
+# ── 9. Start the service now ─────────────────────────
 echo ""
-echo "[8/8] Starting display service..."
+echo "[9/9] Starting display service..."
 systemctl restart fbcp.service
 sleep 3
 

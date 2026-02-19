@@ -7,6 +7,9 @@
  *   0x00, <byte>
  * Only bulk pixel data (after RAMWR) is sent as raw bytes.
  * This matches the kernel fbtft fb_ili9486 driver behavior.
+ *
+ * Optional touch support (--touch): polls XPT2046 on SPI CE1 and
+ * injects events via uinput.  Compiled when ENABLE_TOUCH=1.
  */
 
 #include <stdio.h>
@@ -23,6 +26,12 @@
 #include <linux/fb.h>
 #include <linux/spi/spidev.h>
 #include <linux/gpio.h>
+
+#ifdef ENABLE_TOUCH
+#include <pthread.h>
+#include "touch/xpt2046.h"
+#include "touch/uinput_touch.h"
+#endif
 
 #define DISPLAY_W  480
 #define DISPLAY_H  320
@@ -225,11 +234,69 @@ static inline uint16_t to565(uint32_t px, uint32_t ro, uint32_t go, uint32_t bo)
                       ((px >> (bo+8-5-11)) & 0x001F));
 }
 
+/* ── Touch thread (optional) ─────────────────────────────────────── */
+#ifdef ENABLE_TOUCH
+struct touch_args {
+    const char     *spi_dev;
+    uint16_t        width;
+    uint16_t        height;
+    volatile int   *running;
+};
+
+static void *touch_thread_fn(void *arg)
+{
+    struct touch_args *ta = arg;
+
+    struct xpt2046 *ts = xpt2046_open(ta->spi_dev, 1000000);
+    if (!ts) {
+        fprintf(stderr, "fbcp: Touch: failed to open XPT2046 on %s\n", ta->spi_dev);
+        return NULL;
+    }
+
+    struct uinput_touch *ut = uinput_touch_create(ta->width, ta->height);
+    if (!ut) {
+        fprintf(stderr, "fbcp: Touch: failed to create uinput device\n");
+        xpt2046_close(ts);
+        return NULL;
+    }
+
+    /* Default identity calibration: raw 0..4095 → screen 0..width/height */
+    struct touch_cal cal = {
+        .ax = (float)ta->width / 4096.0f, .bx = 0.0f, .cx = 0.0f,
+        .ay = 0.0f, .by = (float)ta->height / 4096.0f, .cy = 0.0f,
+    };
+
+    fprintf(stderr, "fbcp: Touch thread started (%s, ~100 Hz)\n", ta->spi_dev);
+
+    while (*(ta->running)) {
+        int x, y;
+        int down = xpt2046_read(ts, &cal, &x, &y);
+        if (down) {
+            if (x < 0) x = 0;
+            if (x >= ta->width) x = ta->width - 1;
+            if (y < 0) y = 0;
+            if (y >= ta->height) y = ta->height - 1;
+        }
+        uinput_touch_report(ut, down, x, y);
+        usleep(10000); /* ~100 Hz */
+    }
+
+    uinput_touch_destroy(ut);
+    xpt2046_close(ts);
+    fprintf(stderr, "fbcp: Touch thread stopped\n");
+    return NULL;
+}
+#endif /* ENABLE_TOUCH */
+
 int main(int argc, char **argv)
 {
     const char *src_dev="/dev/fb0", *spi_dev="/dev/spidev0.0", *gpiochip="/dev/gpiochip0";
     int fps = 15;
     int test_pattern = 0;
+#ifdef ENABLE_TOUCH
+    int touch_enabled = 0;
+    const char *touch_dev = "/dev/spidev0.1";
+#endif
 
     for (int i=1; i<argc; i++) {
         if (!strncmp(argv[i],"--src=",6)) src_dev=argv[i]+6;
@@ -237,8 +304,16 @@ int main(int argc, char **argv)
         else if (!strncmp(argv[i],"--gpio=",7)) gpiochip=argv[i]+7;
         else if (!strncmp(argv[i],"--fps=",6)) { fps=atoi(argv[i]+6); if(fps<1)fps=1; if(fps>60)fps=60; }
         else if (!strcmp(argv[i],"--test")) test_pattern=1;
+#ifdef ENABLE_TOUCH
+        else if (!strcmp(argv[i],"--touch")) touch_enabled=1;
+        else if (!strncmp(argv[i],"--touch-dev=",12)) { touch_dev=argv[i]+12; touch_enabled=1; }
+#endif
         else if (!strcmp(argv[i],"-h")||!strcmp(argv[i],"--help")) {
-            printf("Usage: fbcp [--src=DEV] [--spi=DEV] [--gpio=CHIP] [--fps=N] [--test]\n"); return 0;
+            printf("Usage: fbcp [--src=DEV] [--spi=DEV] [--gpio=CHIP] [--fps=N] [--test]"
+#ifdef ENABLE_TOUCH
+                   " [--touch] [--touch-dev=DEV]"
+#endif
+                   "\n"); return 0;
         }
     }
 
@@ -280,6 +355,19 @@ int main(int argc, char **argv)
     fprintf(stderr, "fbcp: %s %ux%u %ubpp → %dx%d @ %d FPS\n",
             src_dev, sw, sh, sbpp, DISPLAY_W, DISPLAY_H, fps);
 
+    /* Start touch thread if requested */
+#ifdef ENABLE_TOUCH
+    pthread_t touch_tid = 0;
+    struct touch_args ta = { .spi_dev = touch_dev, .width = DISPLAY_W,
+                             .height = DISPLAY_H, .running = &g_running };
+    if (touch_enabled) {
+        if (pthread_create(&touch_tid, NULL, touch_thread_fn, &ta) != 0) {
+            perror("pthread_create (touch)");
+            touch_tid = 0;
+        }
+    }
+#endif
+
     size_t npx = DISPLAY_W * DISPLAY_H;
     uint16_t *dbuf = calloc(npx, 2);
     long fns = 1000000000L / fps;
@@ -317,6 +405,11 @@ int main(int argc, char **argv)
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
     }
 
-    free(dbuf); close(spi_fd); close(dc_fd); close(rst_fd);
+    free(dbuf);
+#ifdef ENABLE_TOUCH
+    if (touch_enabled && touch_tid)
+        pthread_join(touch_tid, NULL);
+#endif
+    close(spi_fd); close(dc_fd); close(rst_fd);
     return 0;
 }

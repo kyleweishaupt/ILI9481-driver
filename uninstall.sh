@@ -71,8 +71,17 @@ rm -f /etc/modprobe.d/vfb-ili9481.conf    # legacy vfb installs
 # =====================================================================
 
 echo "[4/7] Removing X11 display and touch config"
+rm -f /etc/X11/xorg.conf.d/99-fbdev-tft.conf
 rm -f /etc/X11/xorg.conf.d/99-inland-fbdev.conf
 rm -f /etc/X11/xorg.conf.d/99-inland-touch.conf
+rm -f /etc/X11/xorg.conf.d/99-v3d.conf.bak
+
+# Restore the modesetting config if we disabled it
+NOGLAMOR="/usr/share/X11/xorg.conf.d/20-noglamor.conf"
+if [ -f "${NOGLAMOR}.bak" ] && [ ! -f "$NOGLAMOR" ]; then
+    mv "${NOGLAMOR}.bak" "$NOGLAMOR"
+    echo "  Restored 20-noglamor.conf"
+fi
 
 # =====================================================================
 # [5/7] Remove module autoload hints
