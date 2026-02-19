@@ -1,0 +1,15 @@
+[Unit]
+Description=Framebuffer mirror (HDMI → TFT via userspace SPI)
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStartPre=/bin/bash -c 'for i in 1 2 3 4 5; do [ -e /dev/spidev0.0 ] && exit 0; sleep 1; done; modprobe spi_bcm2835 2>/dev/null; modprobe spidev 2>/dev/null; for d in /sys/bus/spi/devices/spi0.*; do [ -e "$d/driver_override" ] && echo spidev > "$d/driver_override" 2>/dev/null && echo "$(basename $d)" > /sys/bus/spi/drivers/spidev/bind 2>/dev/null; done; sleep 2; [ -e /dev/spidev0.0 ]'
+ExecStart=/usr/local/bin/fbcp --fps=10
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

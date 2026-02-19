@@ -1,308 +1,99 @@
 #!/bin/bash
-# SPDX-License-Identifier: GPL-2.0-only
+# install.sh — Inland 3.5" TFT (ILI9486 SPI) display installer
 #
-# install.sh — Inland TFT35 ILI9481 (userspace framebuffer daemon) installer
+# Userspace SPI driver approach: fbcp talks directly to /dev/spidev0.0
+# using GPIO chardev for DC/RST pins. No kernel fbtft overlay needed.
 #
-# Builds and installs the ili9481-fb userspace daemon that mirrors the HDMI
-# framebuffer (fb0) to the ILI9481 panel via MMIO GPIO writes.
-# No kernel headers, DKMS, vfb module, or custom kernel modules required.
-#
-# Targets: Raspberry Pi OS Trixie (Debian 13, kernel 6.12+, 64-bit)
-#          Raspberry Pi 1/2/3/4/Zero/Zero 2 W (NOT Pi 5)
-#
-# Usage:  sudo ./install.sh [OPTIONS]
+# Usage: sudo ./install.sh
 
 set -euo pipefail
 
-# =====================================================================
-# Defaults
-# =====================================================================
-
-ROTATE=270
-FPS=30
-TOUCH=0
-X11_ON_TFT=0
-
-# =====================================================================
-# Argument parsing
-# =====================================================================
-
-for arg in "$@"; do
-    case "$arg" in
-        --rotate=*)    ROTATE="${arg#*=}" ;;
-        --fps=*)       FPS="${arg#*=}" ;;
-        --touch)       TOUCH=1 ;;
-        --no-touch)    TOUCH=0 ;;
-        --x11-on-tft)  X11_ON_TFT=1 ;;
-        --help|-h)
-            echo "Usage: sudo ./install.sh [OPTIONS]"
-            echo "  --rotate=DEG      Display rotation: 0, 90, 180, 270 (default: 270)"
-            echo "  --fps=N           Framebuffer refresh rate (default: 30)"
-            echo "  --touch           Enable XPT2046 touch (WARNING: conflicts with data bus)"
-            echo "  --no-touch        Skip touch setup (default)"
-            echo "  --x11-on-tft      Redirect X11 desktop to TFT (disables HDMI desktop)"
-            exit 0
-            ;;
-        *)
-            echo "Unknown option: $arg"
-            exit 1
-            ;;
-    esac
-done
-
-# =====================================================================
-# Sanity checks
-# =====================================================================
-
 if [ "$(id -u)" -ne 0 ]; then
-    echo "Run as root: sudo ./install.sh"
+    echo "Error: run as root:  sudo ./install.sh"
     exit 1
 fi
-
-case "$ROTATE" in
-    0|90|180|270) ;;
-    *)
-        echo "Invalid --rotate value: $ROTATE (must be 0, 90, 180, or 270)"
-        exit 1
-        ;;
-esac
-
-# =====================================================================
-# Locate boot partition paths
-# =====================================================================
-
-OVERLAYS_DIR="/boot/overlays"
-CONFIG="/boot/config.txt"
-CMDLINE="/boot/cmdline.txt"
-if [ -d "/boot/firmware/overlays" ]; then
-    OVERLAYS_DIR="/boot/firmware/overlays"
-    CONFIG="/boot/firmware/config.txt"
-    CMDLINE="/boot/firmware/cmdline.txt"
-fi
-
-if [ ! -f "$CONFIG" ] || [ ! -f "$CMDLINE" ]; then
-    echo "Could not find boot config files."
-    echo "Expected: $CONFIG and $CMDLINE"
-    exit 1
-fi
-
-# =====================================================================
-# Helpers
-# =====================================================================
-
-matrix_for_rotation() {
-    case "$1" in
-        0)   echo "1 0 0 0 1 0 0 0 1" ;;
-        90)  echo "0 1 0 -1 0 1 0 0 1" ;;
-        180) echo "-1 0 1 0 -1 1 0 0 1" ;;
-        270) echo "0 -1 1 1 0 0 0 0 1" ;;
-    esac
-}
-
-remove_lines() {
-    local file="$1"; shift
-    for pattern in "$@"; do
-        sed -i "$pattern" "$file"
-    done
-}
-
-# =====================================================================
-# Banner
-# =====================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
 
-echo "Inland TFT35 ILI9481 installer (userspace daemon)"
-echo "Config:   $CONFIG"
-echo "Cmdline:  $CMDLINE"
-echo "Rotation: $ROTATE"
-echo "FPS:      $FPS"
-echo "Touch:    $([ "$TOUCH" -eq 1 ] && echo yes || echo no)"
-echo "X11→TFT:  $([ "$X11_ON_TFT" -eq 1 ] && echo yes || echo no)"
-echo
+echo "═══════════════════════════════════════════════════"
+echo " Inland 3.5\" TFT LCD (ILI9486) — Installer"
+echo "═══════════════════════════════════════════════════"
 
-# =====================================================================
-# [1/8] Install required packages
-# =====================================================================
+# ── 1. Build ──────────────────────────────────────────
+echo "[1/5] Building fbcp..."
+if ! command -v gcc &>/dev/null; then
+    apt-get update -qq && apt-get install -y -qq gcc
+fi
+gcc -O2 -Wall -Wno-stringop-truncation -o fbcp src/fbcp.c
+echo "  Built OK"
 
-echo "[1/8] Installing required packages"
-apt-get update
-apt-get install -y \
-    build-essential \
-    fbset \
-    xserver-xorg-video-fbdev \
-    xserver-xorg-input-evdev \
-    xinput
+# ── 2. Install binary ────────────────────────────────
+echo "[2/5] Installing binary..."
+install -m 755 fbcp /usr/local/bin/fbcp
+echo "  Installed /usr/local/bin/fbcp"
 
-# =====================================================================
-# [2/8] Build and install ili9481-fb userspace daemon
-# =====================================================================
+# ── 3. Enable SPI in config.txt ──────────────────────
+echo "[3/5] Enabling SPI..."
+CONFIG="/boot/config.txt"
+[ -f "/boot/firmware/config.txt" ] && CONFIG="/boot/firmware/config.txt"
 
-echo "[2/8] Building and installing ili9481-fb daemon"
-
-if [ ! -f "${SCRIPT_DIR}/src/core/service_main.c" ]; then
-    echo "Error: source not found at ${SCRIPT_DIR}/src/core/service_main.c"
-    exit 1
+if ! grep -q "^dtparam=spi=on" "$CONFIG" 2>/dev/null; then
+    echo "dtparam=spi=on" >> "$CONFIG"
+    echo "  Added dtparam=spi=on to $CONFIG"
+else
+    echo "  SPI already enabled in $CONFIG"
 fi
 
-make -C "${SCRIPT_DIR}" clean 2>/dev/null || true
-make -C "${SCRIPT_DIR}" ENABLE_TOUCH=${TOUCH}
-make -C "${SCRIPT_DIR}" install
+# Remove any conflicting fbtft overlays
+sed -i '/^dtoverlay=piscreen/d'     "$CONFIG" 2>/dev/null || true
+sed -i '/^dtoverlay=tft35a/d'       "$CONFIG" 2>/dev/null || true
+sed -i '/^dtoverlay=waveshare35a/d' "$CONFIG" 2>/dev/null || true
 
-# =====================================================================
-# [3/8] Write runtime configuration
-# =====================================================================
+# Ensure spidev devices exist (add spi0-2cs overlay if no other SPI overlay)
+if ! grep -q "^dtoverlay=spi0" "$CONFIG" 2>/dev/null; then
+    echo "dtoverlay=spi0-2cs" >> "$CONFIG"
+    echo "  Added dtoverlay=spi0-2cs to $CONFIG"
+fi
 
-echo "[3/8] Writing runtime configuration"
-
-mkdir -p /etc/ili9481
-
-cat > /etc/ili9481/ili9481.conf <<EOF
-# ILI9481 userspace framebuffer daemon configuration
-# Generated by install.sh on $(date)
-
-[display]
-rotation = ${ROTATE}
-fps = ${FPS}
-
-# Source framebuffer to mirror (HDMI = /dev/fb0)
-fb_device = /dev/fb0
-
-[touch]
-enable_touch = ${TOUCH}
-spi_device = /dev/spidev0.1
-spi_speed = 2000000
-EOF
-
-# =====================================================================
-# [4/8] Clean stale config from previous kernel-module / vfb installs
-# =====================================================================
-
-echo "[4/8] Cleaning old config entries"
-
-# Remove old kernel module / DTS overlay entries
-remove_lines "$CONFIG" \
-    '/^# Inland TFT35 SPI display/d' \
-    '/^# Inland TFT35 ILI9481 display/d' \
-    '/^# BEGIN inland-tft35$/,/^# END inland-tft35$/d' \
-    '/^dtoverlay=piscreen/d' \
-    '/^dtoverlay=waveshare35a/d' \
-    '/^dtoverlay=ili9481/d' \
-    '/^dtoverlay=inland-ili9481-overlay/d' \
-    '/^dtoverlay=ads7846,/d' \
-    '/^dtoverlay=xpt2046,/d' \
-    '/^disable_fw_kms_setup=1/d'
-
-# Remove old fbcon= mapping from cmdline
-sed -i 's/ fbcon=map:[^ ]*//g'  "$CMDLINE"
-sed -i 's/  */ /g'              "$CMDLINE"
-sed -i 's/[[:space:]]*$//'      "$CMDLINE"
-
-# Restore KMS lines that old installer may have commented out
-sed -i 's/^#\(dtoverlay=vc4-kms-v3d\)/\1/'     "$CONFIG"
-sed -i 's/^#\(dtoverlay=vc4-fkms-v3d\)/\1/'    "$CONFIG"
-sed -i 's/^#\(display_auto_detect=1\)/\1/'      "$CONFIG"
-
-# Remove old DTS overlay artifacts
-rm -f "${OVERLAYS_DIR}/inland-ili9481-overlay.dtbo"
-rm -f "${OVERLAYS_DIR}/inland-ili9481-overlay.dts"
-
-# Remove old vfb module autoload files (from previous installs)
-rm -f /etc/modprobe.d/vfb-ili9481.conf
-rm -f /etc/modules-load.d/inland-tft35.conf
-
-# =====================================================================
-# [5/8] Install systemd service
-# =====================================================================
-
-echo "[5/8] Installing systemd service"
-
-# Stop old services if running
-systemctl disable --now ili9481-fb.service >/dev/null 2>&1 || true
-systemctl disable --now inland-tft35-boot.service >/dev/null 2>&1 || true
-
-# Install the daemon service
-cp "${SCRIPT_DIR}/systemd/ili9481-fb.service" /etc/systemd/system/
-
+# ── 4. Install systemd service ───────────────────────
+echo "[4/5] Installing systemd service..."
+cp systemd/fbcp.service /etc/systemd/system/fbcp.service
 systemctl daemon-reload
-systemctl enable ili9481-fb.service
+systemctl enable fbcp.service
+echo "  Enabled fbcp.service"
 
-# =====================================================================
-# [6/8] X11 framebuffer and touch configuration (only if requested)
-# =====================================================================
+# ── 5. Unload conflicting kernel modules ─────────────
+echo "[5/5] Cleaning up kernel modules..."
+rmmod fb_ili9486 2>/dev/null && echo "  Unloaded fb_ili9486" || true
+rmmod fbtft      2>/dev/null && echo "  Unloaded fbtft"      || true
+rmmod ads7846    2>/dev/null && echo "  Unloaded ads7846"    || true
 
-echo "[6/8] X11 configuration"
+# Ensure spidev devices exist now
+if [ ! -e /dev/spidev0.0 ]; then
+    modprobe spi_bcm2835 2>/dev/null || true
+    modprobe spidev 2>/dev/null || true
+    for d in /sys/bus/spi/devices/spi0.*; do
+        [ -e "$d/driver_override" ] && echo spidev > "$d/driver_override" 2>/dev/null || true
+        echo "$(basename "$d")" > /sys/bus/spi/drivers/spidev/bind 2>/dev/null || true
+    done
+    sleep 1
+fi
 
-mkdir -p /etc/X11/xorg.conf.d
-
-# Only redirect X11 to the TFT if explicitly requested.
-# Without --x11-on-tft, HDMI desktop keeps working and the TFT is a
-# mirror-only display driven by the daemon reading /dev/fb0.
-if [ "$X11_ON_TFT" -eq 1 ]; then
-    cat > /etc/X11/xorg.conf.d/99-inland-fbdev.conf <<'EOF'
-Section "Device"
-    Identifier "InlandILI9481"
-    Driver "fbdev"
-    Option "fbdev" "/dev/fb0"
-EndSection
-EOF
+echo ""
+echo "═══════════════════════════════════════════════════"
+echo " Installation complete!"
+echo ""
+echo " Starting display now..."
+systemctl restart fbcp.service
+sleep 2
+if systemctl is-active --quiet fbcp.service; then
+    echo " ✓ Display service is running"
 else
-    rm -f /etc/X11/xorg.conf.d/99-inland-fbdev.conf
+    echo " ✗ Service failed — check: journalctl -u fbcp.service"
 fi
-
-TOUCH_MATRIX="$(matrix_for_rotation "$ROTATE")"
-if [ "$TOUCH" -eq 1 ]; then
-    cat > /etc/X11/xorg.conf.d/99-inland-touch.conf <<EOF
-Section "InputClass"
-    Identifier "InlandTouch"
-    MatchProduct "ILI9481 Touch"
-    Driver "evdev"
-    Option "CalibrationMatrix" "${TOUCH_MATRIX}"
-    Option "EmulateThirdButton" "true"
-EndSection
-EOF
-else
-    rm -f /etc/X11/xorg.conf.d/99-inland-touch.conf
-fi
-
-# =====================================================================
-# [7/8] Clean up legacy boot mapping service
-# =====================================================================
-
-echo "[7/8] Cleaning legacy boot mapper"
-
-# Remove the inland-tft35-boot service — the daemon runs independently
-# and must never block display-manager or any other service.
-systemctl disable --now inland-tft35-boot.service >/dev/null 2>&1 || true
-rm -f /etc/systemd/system/inland-tft35-boot.service
-rm -f /usr/local/bin/inland-tft35-boot
-systemctl daemon-reload 2>/dev/null || true
-
-# =====================================================================
-# [8/8] Final checks (non-destructive)
-# =====================================================================
-
-echo "[8/8] Final checks"
-
-# Do NOT force a Wayland→X11 switch.  The daemon mirrors /dev/fb0
-# regardless of whether the desktop uses Wayland or X11.
-if command -v raspi-config >/dev/null 2>&1; then
-    WAYLAND_STATE="$(raspi-config nonint get_wayland 2>/dev/null || echo unknown)"
-    if [ "$WAYLAND_STATE" = "0" ]; then
-        echo "  Desktop backend: Wayland (daemon will still work — it reads fb0 directly)"
-    else
-        echo "  Desktop backend: X11"
-    fi
-fi
-
-# =====================================================================
-# Done
-# =====================================================================
-
-echo
-echo "Install complete."
-echo "  Binary:  /usr/local/bin/ili9481-fb"
-echo "  Config:  /etc/ili9481/ili9481.conf"
-echo "  Service: ili9481-fb.service"
-echo
-echo "Reboot now: sudo reboot"
+echo ""
+echo " The display will auto-start on boot."
+echo " To stop:   sudo systemctl stop fbcp.service"
+echo " To remove: sudo ./uninstall.sh"
+echo "═══════════════════════════════════════════════════"
