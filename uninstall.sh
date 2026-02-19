@@ -78,9 +78,27 @@ rm -f /etc/X11/xorg.conf.d/99-v3d.conf.bak
 
 # Restore the modesetting config if we disabled it
 NOGLAMOR="/usr/share/X11/xorg.conf.d/20-noglamor.conf"
-if [ -f "${NOGLAMOR}.bak" ] && [ ! -f "$NOGLAMOR" ]; then
-    mv "${NOGLAMOR}.bak" "$NOGLAMOR"
-    echo "  Restored 20-noglamor.conf"
+for BAK in "${NOGLAMOR}.bak" "${NOGLAMOR}.disabled"; do
+    if [ -f "$BAK" ] && [ ! -f "$NOGLAMOR" ]; then
+        mv "$BAK" "$NOGLAMOR"
+        echo "  Restored 20-noglamor.conf"
+        break
+    fi
+done
+
+# Re-enable gldriver-test services that the installer disabled.
+# rp1-test.service regenerates 99-v3d.conf; glamor-test.service
+# manages 20-noglamor.conf. Both are needed for normal desktop.
+if [ -f /lib/systemd/system/rp1-test.service ]; then
+    systemctl enable rp1-test.service 2>/dev/null || true
+    # Run it once now to regenerate 99-v3d.conf
+    systemctl start rp1-test.service 2>/dev/null || true
+    echo "  Re-enabled rp1-test.service"
+fi
+if [ -f /lib/systemd/system/glamor-test.service ]; then
+    systemctl enable glamor-test.service 2>/dev/null || true
+    systemctl start glamor-test.service 2>/dev/null || true
+    echo "  Re-enabled glamor-test.service"
 fi
 
 # =====================================================================

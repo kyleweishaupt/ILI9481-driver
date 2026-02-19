@@ -60,6 +60,14 @@ rmmod fb_ili9481 2>/dev/null || true
 rmmod fbtft      2>/dev/null || true
 rmmod ads7846    2>/dev/null || true
 
+# The gldriver-test package ships rp1-test.service and glamor-test.service
+# which recreate /etc/X11/xorg.conf.d/99-v3d.conf and
+# /usr/share/X11/xorg.conf.d/20-noglamor.conf on every boot.
+# Both force the modesetting driver which conflicts with fbdev.
+systemctl disable --now rp1-test.service 2>/dev/null || true
+systemctl disable --now glamor-test.service 2>/dev/null || true
+echo "  Disabled rp1-test / glamor-test services (prevent modesetting conflicts)"
+
 # Remove old fbtft overlays from config.txt
 sed -i '/^dtoverlay=piscreen/d'     "$CONFIG" 2>/dev/null || true
 sed -i '/^dtoverlay=tft35a/d'       "$CONFIG" 2>/dev/null || true
@@ -217,7 +225,9 @@ EndSection
 XEOF
 echo "  Installed /etc/X11/xorg.conf.d/99-fbdev-tft.conf"
 
-# Disable the system modesetting override that conflicts with fbdev
+# Remove modesetting configs that conflict with fbdev.
+# rp1-test.service / glamor-test.service were already disabled above,
+# so these files will NOT be recreated on next boot.
 NOGLAMOR="/usr/share/X11/xorg.conf.d/20-noglamor.conf"
 if [ -f "$NOGLAMOR" ]; then
     mv "$NOGLAMOR" "${NOGLAMOR}.bak"
@@ -226,12 +236,9 @@ else
     echo "  20-noglamor.conf already disabled"
 fi
 
-# Also disable the v3d modesetting config if present
 V3DCONF="/etc/X11/xorg.conf.d/99-v3d.conf"
-if [ -f "$V3DCONF" ]; then
-    mv "$V3DCONF" "${V3DCONF}.bak"
-    echo "  Disabled 99-v3d.conf (modesetting conflict)"
-fi
+rm -f "$V3DCONF" "${V3DCONF}.bak" "${V3DCONF}.tmp"
+echo "  Removed 99-v3d.conf (modesetting OutputClass conflict)"
 
 # ── 8. Install systemd service ───────────────────────
 echo ""
