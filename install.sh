@@ -34,6 +34,22 @@ fi
 echo "  Boot config: $CONFIG"
 echo "  Cmdline:     $CMDLINE"
 
+# ── Read settings from ili9481.conf ───────────────────
+CONF_FILE="$SCRIPT_DIR/config/ili9481.conf"
+FBCP_FPS=20
+FBCP_SPI_SPEED=12
+
+if [ -f "$CONF_FILE" ]; then
+    _val=$(grep -E '^fps\s*=' "$CONF_FILE" 2>/dev/null | sed 's/[^0-9]//g' || true)
+    [ -n "$_val" ] && FBCP_FPS="$_val"
+
+    _val=$(grep -E '^spi_speed\s*=' "$CONF_FILE" 2>/dev/null | sed 's/[^0-9]//g' || true)
+    [ -n "$_val" ] && FBCP_SPI_SPEED="$_val"
+fi
+
+echo "  FPS:         $FBCP_FPS"
+echo "  SPI speed:   ${FBCP_SPI_SPEED} MHz"
+
 # ── 1. Build ──────────────────────────────────────────
 echo ""
 echo "[1/9] Building fbcp..."
@@ -126,6 +142,14 @@ if ! grep -q "^hdmi_force_hotplug=1" "$CONFIG" 2>/dev/null; then
 else
     echo "  hdmi_force_hotplug=1 already set"
 fi
+
+# Clean up any leftover native-resolution overrides from previous installs
+sed -i '/^framebuffer_width=/d'  "$CONFIG" 2>/dev/null || true
+sed -i '/^framebuffer_height=/d' "$CONFIG" 2>/dev/null || true
+sed -i '/^hdmi_cvt=/d'   "$CONFIG" 2>/dev/null || true
+sed -i '/^hdmi_group=/d' "$CONFIG" 2>/dev/null || true
+sed -i '/^hdmi_mode=/d'  "$CONFIG" 2>/dev/null || true
+echo "  Cleaned leftover framebuffer/hdmi overrides"
 
 # ── 5. Configure kernel cmdline for boot console ─────
 echo ""
@@ -244,9 +268,14 @@ echo "  Removed 99-v3d.conf (modesetting OutputClass conflict)"
 echo ""
 echo "[8/9] Installing systemd service..."
 cp systemd/fbcp.service /etc/systemd/system/fbcp.service
+
+# Template in user-configured FPS and SPI speed from ili9481.conf
+sed -i "s/--fps=[0-9]*/--fps=${FBCP_FPS}/" /etc/systemd/system/fbcp.service
+sed -i "s/--spi-speed=[0-9]*/--spi-speed=${FBCP_SPI_SPEED}/" /etc/systemd/system/fbcp.service
+
 systemctl daemon-reload
 systemctl enable fbcp.service
-echo "  Enabled fbcp.service"
+echo "  Enabled fbcp.service (fps=${FBCP_FPS}, spi-speed=${FBCP_SPI_SPEED} MHz)"
 
 # ── 9. Start the service now ─────────────────────────
 echo ""
