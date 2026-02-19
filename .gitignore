@@ -1,5 +1,12 @@
 .claude
 
+# Build artifacts
+fbcp
+ili9481-fb
+test_pinout
+test_speed
+*.o
+
 # Editor / OS
 *.swp
 *~

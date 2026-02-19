@@ -36,7 +36,7 @@ echo "  Cmdline:     $CMDLINE"
 
 # ── 1. Build ──────────────────────────────────────────
 echo ""
-echo "[1/7] Building fbcp..."
+echo "[1/9] Building fbcp..."
 if ! command -v gcc &>/dev/null; then
     apt-get update -qq && apt-get install -y -qq gcc
 fi
@@ -46,13 +46,13 @@ echo "  Built OK"
 
 # ── 2. Install binary ────────────────────────────────
 echo ""
-echo "[2/7] Installing binary..."
+echo "[2/9] Installing binary..."
 install -m 755 fbcp /usr/local/bin/fbcp
 echo "  Installed /usr/local/bin/fbcp"
 
 # ── 3. Disable conflicting services/modules ──────────
 echo ""
-echo "[3/7] Removing conflicting drivers..."
+echo "[3/9] Removing conflicting drivers..."
 systemctl disable --now ili9481-fb.service 2>/dev/null || true
 rm -f /etc/systemd/system/ili9481-fb.service
 rmmod fb_ili9486 2>/dev/null || true
@@ -70,7 +70,7 @@ echo "  Cleaned up old drivers and overlays"
 
 # ── 4. Configure config.txt ──────────────────────────
 echo ""
-echo "[4/7] Configuring boot firmware..."
+echo "[4/9] Configuring boot firmware..."
 
 # Enable SPI (required for /dev/spidev0.0)
 if ! grep -q "^dtparam=spi=on" "$CONFIG" 2>/dev/null; then
@@ -121,7 +121,7 @@ fi
 
 # ── 5. Configure kernel cmdline for boot console ─────
 echo ""
-echo "[5/7] Configuring boot console on TFT..."
+echo "[5/9] Configuring boot console on TFT..."
 
 if [ -f "$CMDLINE" ]; then
     CMDLINE_CONTENT=$(cat "$CMDLINE")
