@@ -241,6 +241,9 @@ struct touch_args {
     uint16_t        width;
     uint16_t        height;
     volatile int   *running;
+    int             swap_xy;
+    int             invert_x;
+    int             invert_y;
 };
 
 static void *touch_thread_fn(void *arg)
@@ -260,12 +263,30 @@ static void *touch_thread_fn(void *arg)
         return NULL;
     }
 
-    /* Default identity calibration: raw 0..4095 → screen 0..width/height */
-    struct touch_cal cal = {
-        .ax = (float)ta->width / 4096.0f, .bx = 0.0f, .cx = 0.0f,
-        .ay = 0.0f, .by = (float)ta->height / 4096.0f, .cy = 0.0f,
-    };
+    /*
+     * Build calibration from axis flags.  The XPT2046 raw range is 0-4095.
+     * cal: screen_x = ax*raw_x + bx*raw_y + cx
+     *       screen_y = ay*raw_x + by*raw_y + cy
+     */
+    float sx = (float)ta->width  / 4096.0f;
+    float sy = (float)ta->height / 4096.0f;
+    struct touch_cal cal = { 0 };
 
+    if (ta->swap_xy) {
+        /* raw_y drives screen_x, raw_x drives screen_y */
+        cal.bx = ta->invert_x ? -sx : sx;
+        cal.cx = ta->invert_x ? (float)ta->width : 0.0f;
+        cal.ay = ta->invert_y ? -sy : sy;
+        cal.cy = ta->invert_y ? (float)ta->height : 0.0f;
+    } else {
+        cal.ax = ta->invert_x ? -sx : sx;
+        cal.cx = ta->invert_x ? (float)ta->width : 0.0f;
+        cal.by = ta->invert_y ? -sy : sy;
+        cal.cy = ta->invert_y ? (float)ta->height : 0.0f;
+    }
+
+    fprintf(stderr, "fbcp: Touch: swap_xy=%d invert_x=%d invert_y=%d\n",
+            ta->swap_xy, ta->invert_x, ta->invert_y);
     fprintf(stderr, "fbcp: Touch thread started (%s, ~100 Hz)\n", ta->spi_dev);
 
     while (*(ta->running)) {
@@ -296,6 +317,7 @@ int main(int argc, char **argv)
 #ifdef ENABLE_TOUCH
     int touch_enabled = 0;
     const char *touch_dev = "/dev/spidev0.1";
+    int touch_swap_xy = 0, touch_invert_x = 0, touch_invert_y = 0;
 #endif
 
     for (int i=1; i<argc; i++) {
@@ -307,11 +329,15 @@ int main(int argc, char **argv)
 #ifdef ENABLE_TOUCH
         else if (!strcmp(argv[i],"--touch")) touch_enabled=1;
         else if (!strncmp(argv[i],"--touch-dev=",12)) { touch_dev=argv[i]+12; touch_enabled=1; }
+        else if (!strcmp(argv[i],"--touch-swap-xy")) touch_swap_xy=1;
+        else if (!strcmp(argv[i],"--touch-invert-x")) touch_invert_x=1;
+        else if (!strcmp(argv[i],"--touch-invert-y")) touch_invert_y=1;
 #endif
         else if (!strcmp(argv[i],"-h")||!strcmp(argv[i],"--help")) {
             printf("Usage: fbcp [--src=DEV] [--spi=DEV] [--gpio=CHIP] [--fps=N] [--test]"
 #ifdef ENABLE_TOUCH
-                   " [--touch] [--touch-dev=DEV]"
+                   " [--touch] [--touch-dev=DEV]\n"
+                   "  [--touch-swap-xy] [--touch-invert-x] [--touch-invert-y]"
 #endif
                    "\n"); return 0;
         }
@@ -359,7 +385,10 @@ int main(int argc, char **argv)
 #ifdef ENABLE_TOUCH
     pthread_t touch_tid = 0;
     struct touch_args ta = { .spi_dev = touch_dev, .width = DISPLAY_W,
-                             .height = DISPLAY_H, .running = &g_running };
+                             .height = DISPLAY_H, .running = &g_running,
+                             .swap_xy = touch_swap_xy,
+                             .invert_x = touch_invert_x,
+                             .invert_y = touch_invert_y };
     if (touch_enabled) {
         if (pthread_create(&touch_tid, NULL, touch_thread_fn, &ta) != 0) {
             perror("pthread_create (touch)");
