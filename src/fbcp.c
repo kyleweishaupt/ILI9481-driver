@@ -37,11 +37,11 @@
 #define DISPLAY_H  320
 #define GPIO_DC    24
 #define GPIO_RST   25
-#define SPI_HZ     8000000
 #define SPI_CHUNK  4096
 
 static volatile int g_running = 1;
 static int spi_fd = -1, dc_fd = -1, rst_fd = -1;
+static uint32_t spi_speed = 12000000;  /* default 12 MHz */
 
 static void sig_handler(int s) { (void)s; g_running = 0; }
 
@@ -79,10 +79,9 @@ static int spi_init(const char *dev)
     spi_fd = open(dev, O_RDWR);
     if (spi_fd < 0) { perror(dev); return -1; }
     uint8_t m = SPI_MODE_0, b = 8;
-    uint32_t s = SPI_HZ;
     ioctl(spi_fd, SPI_IOC_WR_MODE, &m);
     ioctl(spi_fd, SPI_IOC_WR_BITS_PER_WORD, &b);
-    ioctl(spi_fd, SPI_IOC_WR_MAX_SPEED_HZ, &s);
+    ioctl(spi_fd, SPI_IOC_WR_MAX_SPEED_HZ, &spi_speed);
     return 0;
 }
 
@@ -92,7 +91,7 @@ static void spi_tx(const uint8_t *buf, uint32_t len)
     memset(&t, 0, sizeof(t));
     t.tx_buf = (uintptr_t)buf;
     t.len = len;
-    t.speed_hz = SPI_HZ;
+    t.speed_hz = spi_speed;
     t.bits_per_word = 8;
     ioctl(spi_fd, SPI_IOC_MESSAGE(1), &t);
 }
@@ -244,6 +243,8 @@ struct touch_args {
     int             swap_xy;
     int             invert_x;
     int             invert_y;
+    int             raw_min;
+    int             raw_max;
 };
 
 static void *touch_thread_fn(void *arg)
@@ -264,29 +265,52 @@ static void *touch_thread_fn(void *arg)
     }
 
     /*
-     * Build calibration from axis flags.  The XPT2046 raw range is 0-4095.
+     * Build calibration from axis flags.
+     * The XPT2046 usable raw range is raw_min..raw_max (default 200..3900).
      * cal: screen_x = ax*raw_x + bx*raw_y + cx
      *       screen_y = ay*raw_x + by*raw_y + cy
      */
-    float sx = (float)ta->width  / 4096.0f;
-    float sy = (float)ta->height / 4096.0f;
+    float rng = (float)(ta->raw_max - ta->raw_min);
+    float sx = (float)ta->width  / rng;
+    float sy = (float)ta->height / rng;
+    float rmin = (float)ta->raw_min;
     struct touch_cal cal = { 0 };
 
     if (ta->swap_xy) {
         /* raw_y drives screen_x, raw_x drives screen_y */
-        cal.bx = ta->invert_x ? -sx : sx;
-        cal.cx = ta->invert_x ? (float)ta->width : 0.0f;
-        cal.ay = ta->invert_y ? -sy : sy;
-        cal.cy = ta->invert_y ? (float)ta->height : 0.0f;
+        if (ta->invert_x) {
+            cal.bx = -sx;
+            cal.cx = (float)ta->raw_max * sx;
+        } else {
+            cal.bx = sx;
+            cal.cx = -rmin * sx;
+        }
+        if (ta->invert_y) {
+            cal.ay = -sy;
+            cal.cy = (float)ta->raw_max * sy;
+        } else {
+            cal.ay = sy;
+            cal.cy = -rmin * sy;
+        }
     } else {
-        cal.ax = ta->invert_x ? -sx : sx;
-        cal.cx = ta->invert_x ? (float)ta->width : 0.0f;
-        cal.by = ta->invert_y ? -sy : sy;
-        cal.cy = ta->invert_y ? (float)ta->height : 0.0f;
+        if (ta->invert_x) {
+            cal.ax = -sx;
+            cal.cx = (float)ta->raw_max * sx;
+        } else {
+            cal.ax = sx;
+            cal.cx = -rmin * sx;
+        }
+        if (ta->invert_y) {
+            cal.by = -sy;
+            cal.cy = (float)ta->raw_max * sy;
+        } else {
+            cal.by = sy;
+            cal.cy = -rmin * sy;
+        }
     }
 
-    fprintf(stderr, "fbcp: Touch: swap_xy=%d invert_x=%d invert_y=%d\n",
-            ta->swap_xy, ta->invert_x, ta->invert_y);
+    fprintf(stderr, "fbcp: Touch: swap_xy=%d invert_x=%d invert_y=%d raw=%d..%d\n",
+            ta->swap_xy, ta->invert_x, ta->invert_y, ta->raw_min, ta->raw_max);
     fprintf(stderr, "fbcp: Touch thread started (%s, ~100 Hz)\n", ta->spi_dev);
 
     while (*(ta->running)) {
@@ -318,6 +342,7 @@ int main(int argc, char **argv)
     int touch_enabled = 0;
     const char *touch_dev = "/dev/spidev0.1";
     int touch_swap_xy = 0, touch_invert_x = 0, touch_invert_y = 0;
+    int touch_raw_min = 200, touch_raw_max = 3900;
 #endif
 
     for (int i=1; i<argc; i++) {
@@ -325,6 +350,7 @@ int main(int argc, char **argv)
         else if (!strncmp(argv[i],"--spi=",6)) spi_dev=argv[i]+6;
         else if (!strncmp(argv[i],"--gpio=",7)) gpiochip=argv[i]+7;
         else if (!strncmp(argv[i],"--fps=",6)) { fps=atoi(argv[i]+6); if(fps<1)fps=1; if(fps>60)fps=60; }
+        else if (!strncmp(argv[i],"--spi-speed=",12)) { spi_speed=(uint32_t)(atoi(argv[i]+12)*1000000); }
         else if (!strcmp(argv[i],"--test")) test_pattern=1;
 #ifdef ENABLE_TOUCH
         else if (!strcmp(argv[i],"--touch")) touch_enabled=1;
@@ -332,12 +358,15 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i],"--touch-swap-xy")) touch_swap_xy=1;
         else if (!strcmp(argv[i],"--touch-invert-x")) touch_invert_x=1;
         else if (!strcmp(argv[i],"--touch-invert-y")) touch_invert_y=1;
+        else if (!strncmp(argv[i],"--touch-raw-min=",16)) touch_raw_min=atoi(argv[i]+16);
+        else if (!strncmp(argv[i],"--touch-raw-max=",16)) touch_raw_max=atoi(argv[i]+16);
 #endif
         else if (!strcmp(argv[i],"-h")||!strcmp(argv[i],"--help")) {
-            printf("Usage: fbcp [--src=DEV] [--spi=DEV] [--gpio=CHIP] [--fps=N] [--test]"
+            printf("Usage: fbcp [--src=DEV] [--spi=DEV] [--gpio=CHIP] [--fps=N] [--spi-speed=MHz] [--test]"
 #ifdef ENABLE_TOUCH
-                   " [--touch] [--touch-dev=DEV]\n"
-                   "  [--touch-swap-xy] [--touch-invert-x] [--touch-invert-y]"
+                   "\n  [--touch] [--touch-dev=DEV] [--touch-swap-xy]\n"
+                   "  [--touch-invert-x] [--touch-invert-y]\n"
+                   "  [--touch-raw-min=N] [--touch-raw-max=N]"
 #endif
                    "\n"); return 0;
         }
@@ -388,7 +417,9 @@ int main(int argc, char **argv)
                              .height = DISPLAY_H, .running = &g_running,
                              .swap_xy = touch_swap_xy,
                              .invert_x = touch_invert_x,
-                             .invert_y = touch_invert_y };
+                             .invert_y = touch_invert_y,
+                             .raw_min = touch_raw_min,
+                             .raw_max = touch_raw_max };
     if (touch_enabled) {
         if (pthread_create(&touch_tid, NULL, touch_thread_fn, &ta) != 0) {
             perror("pthread_create (touch)");
