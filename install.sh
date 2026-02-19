@@ -43,7 +43,7 @@ if [ -f "$CONF_FILE" ]; then
     _val=$(grep -E '^fps\s*=' "$CONF_FILE" 2>/dev/null | sed 's/[^0-9]//g' || true)
     [ -n "$_val" ] && FBCP_FPS="$_val"
 
-    _val=$(grep -E '^spi_speed\s*=' "$CONF_FILE" 2>/dev/null | sed 's/[^0-9]//g' || true)
+    _val=$(grep -E '^display_speed\s*=' "$CONF_FILE" 2>/dev/null | head -1 | sed 's/[^0-9]//g' || true)
     [ -n "$_val" ] && FBCP_SPI_SPEED="$_val"
 fi
 
@@ -158,13 +158,12 @@ echo "[5/9] Configuring boot console on TFT..."
 if [ -f "$CMDLINE" ]; then
     CMDLINE_CONTENT=$(cat "$CMDLINE")
 
-    # Force a video mode so the HDMI framebuffer exists at boot
-    if ! echo "$CMDLINE_CONTENT" | grep -q "video=HDMI-A-1"; then
-        CMDLINE_CONTENT="$CMDLINE_CONTENT video=HDMI-A-1:640x480@60D"
-        echo "  Added video=HDMI-A-1:640x480@60D (force HDMI fb at boot)"
-    else
-        echo "  video=HDMI-A-1 already set"
-    fi
+    # Force a video mode so the HDMI framebuffer exists at boot.
+    # 720x480 is 3:2 — same aspect ratio as the 480x320 TFT, so
+    # scaling is uniform (no squish).  Replace any prior setting.
+    CMDLINE_CONTENT=$(echo "$CMDLINE_CONTENT" | sed 's/ *video=HDMI-A-1:[^ ]*//g')
+    CMDLINE_CONTENT="$CMDLINE_CONTENT video=HDMI-A-1:720x480@60D"
+    echo "  Set video=HDMI-A-1:720x480@60D (3:2 — matches TFT aspect ratio)"
 
     # Remove 'quiet' and 'splash' so boot messages are visible on TFT
     CMDLINE_CONTENT=$(echo "$CMDLINE_CONTENT" | sed 's/ quiet / /g; s/^quiet //; s/ quiet$//; s/ splash / /g; s/^splash //; s/ splash$//')
@@ -243,7 +242,7 @@ Section "Screen"
   DefaultDepth 16
   SubSection "Display"
     Depth 16
-    Modes "640x480"
+    Modes "720x480"
   EndSubSection
 EndSection
 XEOF
