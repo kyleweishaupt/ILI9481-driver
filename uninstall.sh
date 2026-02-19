@@ -4,8 +4,7 @@
 # uninstall.sh — Remove Inland TFT35 ILI9481 userspace driver and configuration
 #
 # Reverses the changes made by install.sh: stops/disables services, removes
-# the daemon binary, configuration files, module autoload hints, and cleans
-# boot config entries.
+# the daemon binary, configuration files, and cleans boot config entries.
 
 set -euo pipefail
 
@@ -43,8 +42,10 @@ echo
 
 echo "[1/7] Stopping and disabling services"
 systemctl disable --now ili9481-fb.service >/dev/null 2>&1 || true
+systemctl disable --now fbcp.service >/dev/null 2>&1 || true
 systemctl disable --now inland-tft35-boot.service >/dev/null 2>&1 || true
 rm -f /etc/systemd/system/ili9481-fb.service
+rm -f /etc/systemd/system/fbcp.service
 rm -f /etc/systemd/system/inland-tft35-boot.service
 rm -f /usr/local/bin/inland-tft35-boot
 systemctl daemon-reload
@@ -53,8 +54,9 @@ systemctl daemon-reload
 # [2/7] Remove daemon binary
 # =====================================================================
 
-echo "[2/7] Removing daemon binary"
+echo "[2/7] Removing daemon binaries"
 rm -f /usr/local/bin/ili9481-fb
+rm -f /usr/local/bin/fbcp
 
 # =====================================================================
 # [3/7] Remove configuration files
@@ -99,9 +101,15 @@ sed -i 's/^#\(dtoverlay=vc4-fkms-v3d\)/\1/'    "$CONFIG"
 sed -i 's/^#\(display_auto_detect=1\)/\1/'      "$CONFIG"
 
 # Clean cmdline.txt
-sed -i 's/ fbcon=map:[^ ]*//g'  "$CMDLINE"
+sed -i 's/ fbcon=map:[^ ]*//g'           "$CMDLINE"
+sed -i 's/ video=HDMI-A-1:[^ ]*//g'      "$CMDLINE"
 sed -i 's/  */ /g'              "$CMDLINE"
 sed -i 's/[[:space:]]*$//'      "$CMDLINE"
+
+# Restore 'quiet splash' if missing (typical Pi OS default)
+if ! grep -q 'quiet' "$CMDLINE"; then
+    sed -i 's/rootwait/rootwait quiet splash/' "$CMDLINE"
+fi
 
 # =====================================================================
 # [7/7] Remove installed overlay artifacts (from old kernel-module installs)

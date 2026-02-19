@@ -3,8 +3,9 @@
  * xpt2046.h — SPI XPT2046 touch reader API
  *
  * Only compiled when ENABLE_TOUCH=1.
- * WARNING: GPIO 7 (DB0) = SPI CE1 and GPIO 8 (DB1) = SPI CE0 conflict
- * with the data bus — touch support is unreliable on Inland shields.
+ * WARNING: SPI0 pins (GPIO 9=MISO, 10=MOSI, 11=SCLK) overlap with the
+ * 8-bit parallel data bus (DB0=9, DB2=10, DB1=11).  Touch reads require
+ * pausing display writes and reconfiguring the shared GPIO pins.
  */
 
 #ifndef XPT2046_H

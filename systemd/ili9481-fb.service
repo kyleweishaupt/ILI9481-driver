@@ -1,6 +1,11 @@
 [Unit]
-Description=ILI9481 userspace framebuffer driver
-After=local-fs.target systemd-modules-load.service
+Description=ILI9481 userspace framebuffer driver (TFT display)
+# Start as early as possible — right after local filesystems and /dev are ready.
+# This ensures the TFT shows boot messages and the desktop.
+DefaultDependencies=no
+After=local-fs.target systemd-modules-load.service systemd-udev-settle.service
+Before=display-manager.service graphical.target
+Wants=local-fs.target
 # Safety: never reboot/halt/etc on repeated failure — just stop retrying.
 StartLimitBurst=5
 StartLimitIntervalSec=120
@@ -9,28 +14,33 @@ StartLimitAction=none
 [Service]
 Type=simple
 # Force HDMI connector on so KMS creates /dev/fb0 (even without a
-# physical HDMI monitor).  The kernel cmdline 'video=HDMI-A-1:…D' does
-# this too, but writing to sysfs is a belt-and-suspenders fallback.
+# physical HDMI monitor).
 ExecStartPre=/bin/bash -c '\
   for i in 1 2 3 4 5; do \
     if [ -e /sys/class/drm/card0-HDMI-A-1/status ]; then \
       echo on > /sys/class/drm/card0-HDMI-A-1/status 2>/dev/null || true; \
+      break; \
+    elif [ -e /sys/class/drm/card1-HDMI-A-1/status ]; then \
+      echo on > /sys/class/drm/card1-HDMI-A-1/status 2>/dev/null || true; \
       break; \
     fi; \
     sleep 1; \
   done'
 # Wait for /dev/fb0 to appear after connector is forced on
 ExecStartPre=/bin/bash -c '\
-  for i in 1 2 3 4 5 6 7 8 9 10; do \
+  for i in $(seq 1 15); do \
     [ -e /dev/fb0 ] && exit 0; \
     sleep 1; \
   done; \
-  echo "Warning: /dev/fb0 not found after 10s" >&2'
+  echo "Warning: /dev/fb0 not found after 15s" >&2'
 ExecStart=/usr/local/bin/ili9481-fb --config=/etc/ili9481/ili9481.conf
 Restart=on-failure
-RestartSec=10
+RestartSec=5
+# Keep running through shutdown to show shutdown messages
+KillMode=process
+TimeoutStopSec=5
 StandardOutput=journal
 StandardError=journal
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=sysinit.target
