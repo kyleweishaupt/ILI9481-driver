@@ -132,9 +132,11 @@ sudo reboot
 
 ## Touch Support
 
-The XPT2046 touch controller uses a separate SPI channel (`/dev/spidev0.1`,
-CE1) and does **not** conflict with the display SPI. Touch defaults and raw
-calibration live in `/etc/ili9481/ili9481.conf`.
+The XPT2046 touch controller is addressed on `/dev/spidev0.1` (CE1), but it
+still shares SPI0 data and clock pins with the display path on this shield.
+That means touch is experimental here and is disabled by default in
+`/etc/ili9481/ili9481.conf` because polling it can destabilize display output
+on some systems.
 
 When enabled, the daemon spawns a touch polling thread that:
 

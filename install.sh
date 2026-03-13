@@ -71,6 +71,10 @@ echo "  FPS:         $FBCP_FPS"
 echo "  SPI speed:   ${FBCP_SPI_SPEED} MHz"
 echo "  Render:      ${RENDER_W}x${RENDER_H}"
 echo "  Config:      $CONF_FILE"
+if grep -Eq '^[[:space:]]*enable_touch[[:space:]]*=[[:space:]]*1[[:space:]]*$' "$CONF_FILE" 2>/dev/null; then
+    echo "  Warning: touch support is enabled in $CONF_FILE"
+    echo "           On this shield, touch shares SPI0 pins with the display bus and can cause instability."
+fi
 
 # ── 1. Build ──────────────────────────────────────────
 echo ""

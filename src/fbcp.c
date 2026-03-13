@@ -137,7 +137,7 @@ static void config_defaults(struct runtime_config *cfg)
     cfg->render_height = 480;
     cfg->scale_mode = SCALE_FIT;
 #ifdef ENABLE_TOUCH
-    cfg->touch_enabled = 1;
+    cfg->touch_enabled = 0;
     copy_string(cfg->touch_dev, sizeof(cfg->touch_dev), "/dev/spidev0.1");
     cfg->touch_speed_hz = 1000000;
     cfg->touch_swap_xy = 1;
