@@ -34,6 +34,8 @@ struct uinput_touch {
     int     was_down;   /* previous BTN_TOUCH state */
     int     last_x;     /* last reported X */
     int     last_y;     /* last reported Y */
+    int     tracking_id;
+    int     next_tracking_id;
     int     max_x;
     int     max_y;
 };
@@ -77,6 +79,7 @@ struct uinput_touch *uinput_touch_create(int max_x, int max_y)
 
     /* Enable BTN_TOUCH */
     ioctl(ut->fd, UI_SET_KEYBIT, BTN_TOUCH);
+    ioctl(ut->fd, UI_SET_KEYBIT, BTN_TOOL_FINGER);
 
     /* Enable INPUT_PROP_DIRECT — tells the system this is a direct-input
      * touchscreen (not a touchpad), which is critical for on-screen
@@ -111,6 +114,48 @@ struct uinput_touch *uinput_touch_create(int max_x, int max_y)
         },
     };
     ioctl(ut->fd, UI_ABS_SETUP, &abs_y);
+
+    struct uinput_abs_setup abs_mt_x = {
+        .code = ABS_MT_POSITION_X,
+        .absinfo = {
+            .minimum    = 0,
+            .maximum    = max_x - 1,
+            .fuzz       = 4,
+            .flat       = 0,
+            .resolution = max_x,
+        },
+    };
+    ioctl(ut->fd, UI_ABS_SETUP, &abs_mt_x);
+
+    struct uinput_abs_setup abs_mt_y = {
+        .code = ABS_MT_POSITION_Y,
+        .absinfo = {
+            .minimum    = 0,
+            .maximum    = max_y - 1,
+            .fuzz       = 4,
+            .flat       = 0,
+            .resolution = max_y,
+        },
+    };
+    ioctl(ut->fd, UI_ABS_SETUP, &abs_mt_y);
+
+    struct uinput_abs_setup abs_mt_slot = {
+        .code = ABS_MT_SLOT,
+        .absinfo = {
+            .minimum = 0,
+            .maximum = 0,
+        },
+    };
+    ioctl(ut->fd, UI_ABS_SETUP, &abs_mt_slot);
+
+    struct uinput_abs_setup abs_mt_tracking = {
+        .code = ABS_MT_TRACKING_ID,
+        .absinfo = {
+            .minimum = 0,
+            .maximum = 65535,
+        },
+    };
+    ioctl(ut->fd, UI_ABS_SETUP, &abs_mt_tracking);
 
     /* ABS_PRESSURE: 0..255, fuzz=0. Allows pressure-aware apps. */
     struct uinput_abs_setup abs_p = {
@@ -149,6 +194,8 @@ struct uinput_touch *uinput_touch_create(int max_x, int max_y)
     ut->was_down = 0;
     ut->last_x = 0;
     ut->last_y = 0;
+    ut->tracking_id = -1;
+    ut->next_tracking_id = 1;
     ut->max_x = max_x;
     ut->max_y = max_y;
 
@@ -162,6 +209,15 @@ void uinput_touch_report(struct uinput_touch *ut, int down, int x, int y)
         return;
 
     if (down) {
+        emit(ut->fd, EV_ABS, ABS_MT_SLOT, 0);
+        if (!ut->was_down) {
+            ut->tracking_id = ut->next_tracking_id++;
+            if (ut->next_tracking_id < 0)
+                ut->next_tracking_id = 1;
+            emit(ut->fd, EV_ABS, ABS_MT_TRACKING_ID, ut->tracking_id);
+        }
+        emit(ut->fd, EV_ABS, ABS_MT_POSITION_X, x);
+        emit(ut->fd, EV_ABS, ABS_MT_POSITION_Y, y);
         /* Always send position when pen is down */
         emit(ut->fd, EV_ABS, ABS_X, x);
         emit(ut->fd, EV_ABS, ABS_Y, y);
@@ -171,14 +227,19 @@ void uinput_touch_report(struct uinput_touch *ut, int down, int x, int y)
 
         if (!ut->was_down) {
             /* Pen-down transition */
+            emit(ut->fd, EV_KEY, BTN_TOOL_FINGER, 1);
             emit(ut->fd, EV_KEY, BTN_TOUCH, 1);
             ut->was_down = 1;
         }
     } else {
         if (ut->was_down) {
             /* Pen-up transition: release pressure first, then button */
+            emit(ut->fd, EV_ABS, ABS_MT_SLOT, 0);
+            emit(ut->fd, EV_ABS, ABS_MT_TRACKING_ID, -1);
             emit(ut->fd, EV_ABS, ABS_PRESSURE, 0);
+            emit(ut->fd, EV_KEY, BTN_TOOL_FINGER, 0);
             emit(ut->fd, EV_KEY, BTN_TOUCH, 0);
+            ut->tracking_id = -1;
             ut->was_down = 0;
         } else {
             /* Already up — no event needed */
@@ -196,7 +257,10 @@ void uinput_touch_destroy(struct uinput_touch *ut)
 
     /* Send pen-up if currently down */
     if (ut->was_down) {
+        emit(ut->fd, EV_ABS, ABS_MT_SLOT, 0);
+        emit(ut->fd, EV_ABS, ABS_MT_TRACKING_ID, -1);
         emit(ut->fd, EV_ABS, ABS_PRESSURE, 0);
+        emit(ut->fd, EV_KEY, BTN_TOOL_FINGER, 0);
         emit(ut->fd, EV_KEY, BTN_TOUCH, 0);
         emit(ut->fd, EV_SYN, SYN_REPORT, 0);
     }

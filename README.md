@@ -132,18 +132,22 @@ sudo reboot
 
 ## Touch Support
 
-The XPT2046 touch controller is addressed on `/dev/spidev0.1` (CE1), but it
-still shares SPI0 data and clock pins with the display path on this shield.
-That means touch is experimental here and is disabled by default in
-`/etc/ili9481/ili9481.conf` because polling it can destabilize display output
-on some systems.
+The XPT2046 touch controller uses `/dev/spidev0.1` (CE1) on the same SPI bus as
+the display. `install.sh` enables touch by default, prepares `/dev/uinput`, and
+installs an X11 touch mapping so taps work immediately after reboot.
 
 When enabled, the daemon spawns a touch polling thread that:
 
 1. Reads raw X/Y from the XPT2046 via SPI
 2. Applies EWMA noise filtering
 3. Maps touches to the visible desktop area when aspect-fit letterboxing is active
-4. Reports events via a virtual uinput touchscreen device
+4. Reports events via a virtual uinput touchscreen device with single-touch and multi-touch axes for libinput/X11 compatibility
+
+To install in display-only mode:
+
+```bash
+sudo ./install.sh --no-touch
+```
 
 Touch calibration uses a default identity matrix. For accurate touch,
 calibrate with `xinput_calibrator` or `libinput-calibration-matrix`.

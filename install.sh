@@ -11,6 +11,29 @@
 
 set -euo pipefail
 
+INSTALL_TOUCH=1
+
+for arg in "$@"; do
+    case "$arg" in
+        --touch)
+            INSTALL_TOUCH=1
+            ;;
+        --no-touch)
+            INSTALL_TOUCH=0
+            ;;
+        -h|--help)
+            echo "Usage: sudo ./install.sh [--touch] [--no-touch]"
+            echo "  --touch     Enable touchscreen support (default)"
+            echo "  --no-touch  Install display-only mode"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $arg"
+            exit 1
+            ;;
+    esac
+done
+
 if [ "$(id -u)" -ne 0 ]; then
     echo "Error: run as root:  sudo ./install.sh"
     exit 1
@@ -21,6 +44,18 @@ cd "$SCRIPT_DIR"
 
 CONFIG_DIR="/etc/ili9481"
 INSTALLED_CONF="${CONFIG_DIR}/ili9481.conf"
+
+set_conf_value() {
+    local file="$1"
+    local key="$2"
+    local value="$3"
+
+    if grep -Eq "^[[:space:]]*${key}[[:space:]]*=" "$file" 2>/dev/null; then
+        sed -i -E "s|^[[:space:]]*${key}[[:space:]]*=.*$|${key} = ${value}|" "$file"
+    else
+        printf '%s = %s\n' "$key" "$value" >> "$file"
+    fi
+}
 
 echo "═══════════════════════════════════════════════════"
 echo " Inland 3.5\" TFT LCD (SPI) — Installer"
@@ -48,6 +83,15 @@ else
 fi
 
 CONF_FILE="$INSTALLED_CONF"
+set_conf_value "$CONF_FILE" "enable_touch" "$INSTALL_TOUCH"
+set_conf_value "$CONF_FILE" "spi_device" "/dev/spidev0.1"
+set_conf_value "$CONF_FILE" "spi_speed" "1000000"
+set_conf_value "$CONF_FILE" "touch_swap_xy" "1"
+set_conf_value "$CONF_FILE" "touch_invert_x" "1"
+set_conf_value "$CONF_FILE" "touch_invert_y" "0"
+set_conf_value "$CONF_FILE" "touch_raw_min" "200"
+set_conf_value "$CONF_FILE" "touch_raw_max" "3900"
+
 FBCP_FPS=20
 FBCP_SPI_SPEED=12
 RENDER_W=720
@@ -71,16 +115,17 @@ echo "  FPS:         $FBCP_FPS"
 echo "  SPI speed:   ${FBCP_SPI_SPEED} MHz"
 echo "  Render:      ${RENDER_W}x${RENDER_H}"
 echo "  Config:      $CONF_FILE"
-if grep -Eq '^[[:space:]]*enable_touch[[:space:]]*=[[:space:]]*1[[:space:]]*$' "$CONF_FILE" 2>/dev/null; then
-    echo "  Warning: touch support is enabled in $CONF_FILE"
-    echo "           On this shield, touch shares SPI0 pins with the display bus and can cause instability."
-fi
+echo "  Touch:       $([ "$INSTALL_TOUCH" -eq 1 ] && echo enabled || echo disabled)"
 
 # ── 1. Build ──────────────────────────────────────────
 echo ""
 echo "[1/9] Building fbcp..."
-if ! command -v gcc &>/dev/null; then
-    apt-get update -qq && apt-get install -y -qq gcc
+if ! command -v gcc &>/dev/null || ! command -v make &>/dev/null; then
+    apt-get update -qq && apt-get install -y -qq build-essential
+fi
+apt-get install -y -qq xserver-xorg-video-fbdev >/dev/null
+if [ "$INSTALL_TOUCH" -eq 1 ]; then
+    apt-get install -y -qq xserver-xorg-input-libinput xinput >/dev/null
 fi
 make clean >/dev/null 2>&1 || true
 make
@@ -117,6 +162,14 @@ sed -i '/^dtoverlay=waveshare35a/d' "$CONFIG" 2>/dev/null || true
 # Remove old marker blocks from previous installers
 sed -i '/^# BEGIN inland-ili9486$/,/^# END inland-ili9486$/d' "$CONFIG" 2>/dev/null || true
 echo "  Cleaned up old drivers and overlays"
+
+mkdir -p /etc/modules-load.d
+if [ "$INSTALL_TOUCH" -eq 1 ]; then
+    printf 'uinput\n' > /etc/modules-load.d/ili9481-touch.conf
+    modprobe uinput 2>/dev/null || true
+else
+    rm -f /etc/modules-load.d/ili9481-touch.conf
+fi
 
 # ── 4. Configure config.txt ──────────────────────────
 echo ""
@@ -287,6 +340,22 @@ fi
 V3DCONF="/etc/X11/xorg.conf.d/99-v3d.conf"
 rm -f "$V3DCONF" "${V3DCONF}.bak" "${V3DCONF}.tmp"
 echo "  Removed 99-v3d.conf (modesetting OutputClass conflict)"
+
+if [ "$INSTALL_TOUCH" -eq 1 ]; then
+cat > /etc/X11/xorg.conf.d/99-inland-touch.conf <<'XEOF'
+Section "InputClass"
+    Identifier "Inland Touchscreen"
+    MatchProduct "ILI9481 Touch"
+    MatchIsTouchscreen "on"
+    Driver "libinput"
+    Option "CalibrationMatrix" "1 0 0 0 1 0 0 0 1"
+EndSection
+XEOF
+        echo "  Installed /etc/X11/xorg.conf.d/99-inland-touch.conf"
+else
+        rm -f /etc/X11/xorg.conf.d/99-inland-touch.conf
+        echo "  Touch X11 mapping disabled"
+fi
 
 # ── 8. Install systemd service ───────────────────────
 echo ""
