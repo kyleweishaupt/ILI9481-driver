@@ -19,6 +19,9 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
+CONFIG_DIR="/etc/ili9481"
+INSTALLED_CONF="${CONFIG_DIR}/ili9481.conf"
+
 echo "═══════════════════════════════════════════════════"
 echo " Inland 3.5\" TFT LCD (SPI) — Installer"
 echo "═══════════════════════════════════════════════════"
@@ -34,8 +37,17 @@ fi
 echo "  Boot config: $CONFIG"
 echo "  Cmdline:     $CMDLINE"
 
-# ── Read settings from ili9481.conf ───────────────────
-CONF_FILE="$SCRIPT_DIR/config/ili9481.conf"
+# ── Install and read settings from ili9481.conf ───────
+CONF_TEMPLATE="$SCRIPT_DIR/config/ili9481.conf"
+mkdir -p "$CONFIG_DIR"
+if [ ! -f "$INSTALLED_CONF" ]; then
+    install -m 644 "$CONF_TEMPLATE" "$INSTALLED_CONF"
+    echo "  Installed runtime config: $INSTALLED_CONF"
+else
+    echo "  Preserving existing runtime config: $INSTALLED_CONF"
+fi
+
+CONF_FILE="$INSTALLED_CONF"
 FBCP_FPS=20
 FBCP_SPI_SPEED=12
 RENDER_W=720
@@ -58,6 +70,7 @@ fi
 echo "  FPS:         $FBCP_FPS"
 echo "  SPI speed:   ${FBCP_SPI_SPEED} MHz"
 echo "  Render:      ${RENDER_W}x${RENDER_H}"
+echo "  Config:      $CONF_FILE"
 
 # ── 1. Build ──────────────────────────────────────────
 echo ""
@@ -276,13 +289,9 @@ echo ""
 echo "[8/9] Installing systemd service..."
 cp systemd/fbcp.service /etc/systemd/system/fbcp.service
 
-# Template in user-configured FPS and SPI speed from ili9481.conf
-sed -i "s/--fps=[0-9]*/--fps=${FBCP_FPS}/" /etc/systemd/system/fbcp.service
-sed -i "s/--spi-speed=[0-9]*/--spi-speed=${FBCP_SPI_SPEED}/" /etc/systemd/system/fbcp.service
-
 systemctl daemon-reload
 systemctl enable fbcp.service
-echo "  Enabled fbcp.service (fps=${FBCP_FPS}, spi-speed=${FBCP_SPI_SPEED} MHz)"
+echo "  Enabled fbcp.service (config-backed runtime)"
 
 # ── 9. Start the service now ─────────────────────────
 echo ""
@@ -316,6 +325,7 @@ echo " Commands:"
 echo "   Status:  sudo systemctl status fbcp"
 echo "   Logs:    journalctl -u fbcp.service -f"
 echo "   Stop:    sudo systemctl stop fbcp"
+echo "   Config:  sudoedit /etc/ili9481/ili9481.conf"
 echo "   Remove:  sudo ./uninstall.sh"
 echo ""
 echo " Reboot now: sudo reboot"

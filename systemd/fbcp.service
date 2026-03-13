@@ -1,5 +1,6 @@
 [Unit]
 Description=Framebuffer mirror (HDMI → TFT via SPI)
+ConditionPathExists=/etc/ili9481/ili9481.conf
 # Start early — after local-fs and udev so /dev/spidev0.0 exists.
 # Before the display manager so boot messages are visible on TFT.
 DefaultDependencies=no
@@ -26,7 +27,7 @@ ExecStartPre=/bin/bash -c '\
     sleep 1; \
   done; \
   echo "Warning: /dev/fb0 not found after 15s" >&2'
-ExecStart=/usr/local/bin/fbcp --fps=20 --spi-speed=12 --touch --touch-swap-xy --touch-invert-x
+ExecStart=/usr/local/bin/fbcp --config=/etc/ili9481/ili9481.conf
 Restart=on-failure
 RestartSec=5
 KillMode=process

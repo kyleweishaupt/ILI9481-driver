@@ -7,8 +7,10 @@ Userspace framebuffer mirror daemon for the **Inland 3.5" TFT Touch Shield**
 
 The daemon (`fbcp`) mirrors the HDMI framebuffer (`/dev/fb0`) to the TFT
 display via `/dev/spidev0.0`, converting and scaling pixels to RGB565
-480×320. The display shows the full boot process (kernel messages, systemd
-startup) and then the desktop.
+480×320. The current mirror path now defaults to **aspect-fit scaling** so
+text and touch targets are not stretched when the source framebuffer aspect
+ratio does not match 3:2. The display shows the full boot process (kernel
+messages, systemd startup) and then the desktop.
 
 ---
 
@@ -17,19 +19,19 @@ startup) and then the desktop.
 Despite some documentation calling it "ILI9481 parallel", this specific
 board (and most Inland / MPI3501 3.5" shields) uses:
 
-| Detail              | Value                                                |
-| ------------------- | ---------------------------------------------------- |
-| **Controller**      | ILI9486 (or ILI9488/ILI9486L)                        |
-| **Interface**       | SPI (4-wire, mode 0)                                 |
-| **Register width**  | 16-bit — every command/data byte is sent as `0x00 byte` |
-| **Pixel format**    | RGB565 (16 bits/pixel), raw bytes after RAMWR         |
-| **SPI device**      | `/dev/spidev0.0` (CE0)                                |
-| **DC (RS) pin**     | GPIO 24 (active-high = data, low = command)           |
-| **RST pin**         | GPIO 25 (active-low hardware reset)                   |
-| **SPI clock**       | 16 MHz recommended (tested at 8 MHz)                  |
-| **Touch**           | XPT2046 on `/dev/spidev0.1` (CE1), separate SPI bus  |
-| **Resolution**      | 480×320 (landscape) / 320×480 (portrait)              |
-| **Backlight**       | Always-on 3.3 V, no PWM control                      |
+| Detail             | Value                                                   |
+| ------------------ | ------------------------------------------------------- |
+| **Controller**     | ILI9486 (or ILI9488/ILI9486L)                           |
+| **Interface**      | SPI (4-wire, mode 0)                                    |
+| **Register width** | 16-bit — every command/data byte is sent as `0x00 byte` |
+| **Pixel format**   | RGB565 (16 bits/pixel), raw bytes after RAMWR           |
+| **SPI device**     | `/dev/spidev0.0` (CE0)                                  |
+| **DC (RS) pin**    | GPIO 24 (active-high = data, low = command)             |
+| **RST pin**        | GPIO 25 (active-low hardware reset)                     |
+| **SPI clock**      | 16 MHz recommended (tested at 8 MHz)                    |
+| **Touch**          | XPT2046 on `/dev/spidev0.1` (CE1), separate SPI bus     |
+| **Resolution**     | 480×320 (landscape) / 320×480 (portrait)                |
+| **Backlight**      | Always-on 3.3 V, no PWM control                         |
 
 ### Key discovery: 16-bit SPI register width
 
@@ -67,6 +69,7 @@ zeros = black screen on the TFT.
 compositor keeps `/dev/fb0` in sync with the actual HDMI output.
 
 In `/boot/firmware/config.txt`:
+
 ```ini
 # REQUIRED — use fkms, NOT full kms
 dtoverlay=vc4-fkms-v3d
@@ -81,6 +84,16 @@ hdmi_force_hotplug=1
 > **Do NOT use `vc4-kms-v3d`** — it will result in a working display init
 > (test colors appear) but a black screen when mirroring the desktop.
 
+## Current Integration Boundary
+
+This repository's active path is still a **framebuffer mirror daemon**, not a
+native DRM/KMS panel driver. That means:
+
+- It integrates cleanly with Raspberry Pi OS boot, service management, and touch input.
+- It can be tuned from `/etc/ili9481/ili9481.conf` and started automatically by `systemd`.
+- It does **not** appear to Raspberry Pi OS Trixie as a real Wayland-managed output.
+- Full Wayland display-manager control would require a native KMS/DRM driver path, which this repo does not yet provide.
+
 ---
 
 ## Quick Start
@@ -92,15 +105,18 @@ sudo reboot
 ```
 
 The installer will:
+
 1. Build `fbcp` from source
 2. Install it to `/usr/local/bin/fbcp`
-3. Switch `config.txt` from `vc4-kms-v3d` to `vc4-fkms-v3d`
-4. Configure `cmdline.txt` for boot-time display (`fbcon=map:0`, remove `quiet splash`)
-5. Enable `fbcp.service` (auto-start on boot)
+3. Install the runtime config to `/etc/ili9481/ili9481.conf`
+4. Switch `config.txt` from `vc4-kms-v3d` to `vc4-fkms-v3d`
+5. Configure `cmdline.txt` for boot-time display (`fbcon=map:0`, remove `quiet splash`)
+6. Enable `fbcp.service` (auto-start on boot)
 
 ### Boot display
 
 After installation, the TFT shows:
+
 - **Kernel boot messages** (via fbcon mapped to fb0)
 - **systemd startup** progress
 - **Desktop** (mirrored from HDMI framebuffer)
@@ -117,17 +133,15 @@ sudo reboot
 ## Touch Support
 
 The XPT2046 touch controller uses a separate SPI channel (`/dev/spidev0.1`,
-CE1) and does **not** conflict with the display SPI. Touch can be enabled
-at install time:
-
-```bash
-sudo ./install.sh --touch
-```
+CE1) and does **not** conflict with the display SPI. Touch defaults and raw
+calibration live in `/etc/ili9481/ili9481.conf`.
 
 When enabled, the daemon spawns a touch polling thread that:
+
 1. Reads raw X/Y from the XPT2046 via SPI
 2. Applies EWMA noise filtering
-3. Reports events via a virtual uinput touchscreen device
+3. Maps touches to the visible desktop area when aspect-fit letterboxing is active
+4. Reports events via a virtual uinput touchscreen device
 
 Touch calibration uses a default identity matrix. For accurate touch,
 calibrate with `xinput_calibrator` or `libinput-calibration-matrix`.
@@ -148,6 +162,9 @@ sudo systemctl stop fbcp.service
 
 # Restart
 sudo systemctl restart fbcp.service
+
+# Edit runtime settings
+sudoedit /etc/ili9481/ili9481.conf
 ```
 
 ---
@@ -166,8 +183,9 @@ sudo systemctl restart fbcp.service
 ### Frame loop
 
 Each frame (at configured FPS):
+
 1. Read pixels from mmap'd fb0
-2. Scale from source resolution (e.g., 640×480) to 480×320 nearest-neighbor
+2. Aspect-fit or stretch the source into the 480×320 panel area
 3. Convert pixel format if needed (32bpp XRGB8888 → 16bpp RGB565, byte-swap)
 4. Set CASET/PASET window (full screen)
 5. Send RAMWR (0x2C), then stream all pixel data as raw SPI bytes
@@ -179,20 +197,37 @@ At 8 MHz SPI, each frame is ~307 KB of pixel data = ~0.3s per frame ≈ 3 FPS.
 Increasing SPI clock to 16 MHz doubles throughput to ~6 FPS. Higher clocks
 may work but depend on wiring quality.
 
-| SPI Clock | Approx FPS | Status     |
-| --------- | ---------- | ---------- |
-| 8 MHz     | ~3         | Stable     |
-| 16 MHz    | ~6         | Recommended|
-| 32 MHz    | ~10-12     | Test first |
+| SPI Clock | Approx FPS | Status      |
+| --------- | ---------- | ----------- |
+| 8 MHz     | ~3         | Stable      |
+| 16 MHz    | ~6         | Recommended |
+| 32 MHz    | ~10-12     | Test first  |
 
 ---
 
 ## Configuration
 
+### Runtime config
+
+The installed runtime config is `/etc/ili9481/ili9481.conf`.
+
+Important keys:
+
+- `fps`
+- `display_speed`
+- `fb_device`
+- `render_width` / `render_height`
+- `scale_mode = fit|stretch`
+- `enable_touch`
+- `touch_swap_xy`, `touch_invert_x`, `touch_invert_y`
+- `touch_raw_min`, `touch_raw_max`
+
 ### Command-line options (fbcp)
 
 ```
-fbcp [--src=DEV] [--spi=DEV] [--gpio=CHIP] [--fps=N]
+fbcp [--config=PATH] [--src=DEV] [--spi=DEV] [--gpio=CHIP] [--fps=N]
+     [--render-width=N] [--render-height=N]
+     [--scale-mode=fit|stretch] [--fit] [--stretch]
 
   --src=DEV    Source framebuffer (default: /dev/fb0)
   --spi=DEV    SPI device (default: /dev/spidev0.0)
@@ -227,14 +262,14 @@ Remove `quiet` and `splash` to see boot messages on the TFT.
 
 ### SPI display (active during operation)
 
-| Function | GPIO (BCM) | Pi Pin | Notes              |
-| -------- | ---------- | ------ | ------------------ |
-| SPI MOSI | 10         | 19     | Data to display    |
-| SPI SCLK | 11         | 23     | SPI clock          |
-| SPI CE0  | 8          | 24     | Display chip select|
-| SPI MISO | 9          | 21     | Not used by display|
-| DC (RS)  | 24         | 18     | Command/data select|
-| RST      | 25         | 22     | Hardware reset     |
+| Function | GPIO (BCM) | Pi Pin | Notes               |
+| -------- | ---------- | ------ | ------------------- |
+| SPI MOSI | 10         | 19     | Data to display     |
+| SPI SCLK | 11         | 23     | SPI clock           |
+| SPI CE0  | 8          | 24     | Display chip select |
+| SPI MISO | 9          | 21     | Not used by display |
+| DC (RS)  | 24         | 18     | Command/data select |
+| RST      | 25         | 22     | Hardware reset      |
 
 ### SPI touch (when enabled)
 
@@ -250,14 +285,15 @@ chip select (CE1).
 
 ## Troubleshooting
 
-| Symptom | Cause | Fix |
-| ------- | ----- | --- |
-| All white | No init commands reached the controller | Check SPI enabled, correct spidev device, pin functions: `pinctrl get 8 9 10 11` |
-| Test colors (R/G/B) then black | fb0 has no content (Wayland + full KMS) | Switch to `vc4-fkms-v3d` in config.txt |
-| Test colors then desktop appears | Working correctly | — |
-| Service won't start | SPI device missing | Check `ls /dev/spidev0.0`, ensure `dtparam=spi=on` and `dtoverlay=spi0-2cs` |
-| Low FPS | SPI clock too low | Increase SPI_HZ in fbcp.c (try 16000000) |
-| Garbled/shifted image | Wrong init sequence or rotation | Check MADCTL value, try different rotation |
+| Symptom                                     | Cause                                            | Fix                                                                                         |
+| ------------------------------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------- |
+| All white                                   | No init commands reached the controller          | Check SPI enabled, correct spidev device, pin functions: `pinctrl get 8 9 10 11`            |
+| Test colors (R/G/B) then black              | fb0 has no content (Wayland + full KMS)          | Switch to `vc4-fkms-v3d` in config.txt                                                      |
+| Test colors then desktop appears            | Working correctly                                | —                                                                                           |
+| Service won't start                         | SPI device missing                               | Check `ls /dev/spidev0.0`, ensure `dtparam=spi=on` and `dtoverlay=spi0-2cs`                 |
+| Text looks squashed or taps land off target | Source framebuffer aspect ratio differs from 3:2 | Keep `scale_mode=fit` and set Pi OS render size to `720x480` in `/etc/ili9481/ili9481.conf` |
+| Low FPS                                     | SPI clock too low                                | Increase `display_speed` in `/etc/ili9481/ili9481.conf` (try `16`)                          |
+| Garbled/shifted image                       | Wrong init sequence or rotation                  | Check MADCTL value, try different rotation                                                  |
 
 ### Diagnostic commands
 
@@ -301,7 +337,7 @@ src/
 include/
   ili9481_hw.h                  # Register defines (parallel variant)
 config/
-  ili9481.conf                  # Config file for parallel daemon
+  ili9481.conf                  # Template for /etc/ili9481/ili9481.conf
 systemd/
   fbcp.service                  # systemd unit file (SPI driver)
   ili9481-fb.service            # systemd unit file (parallel variant)
